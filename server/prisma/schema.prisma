@@ -7,13 +7,14 @@ datasource db {
 }
 
 model User {
-  id        String         @id @default(cuid())
-  name      String
-  email     String         @unique
-  password  String
-  createdAt DateTime       @default(now())
-  github    GitHubAccount?
-  projects  Project[]
+  id            String         @id @default(cuid())
+  name          String
+  email         String         @unique
+  password      String
+  createdAt     DateTime       @default(now())
+  github        GitHubAccount?
+  projects      Project[]
+  awsConnection AwsConnection?
 }
 
 model GitHubAccount {
@@ -26,13 +27,98 @@ model GitHubAccount {
 }
 
 model Project {
-  id        String   @id @default(cuid())
-  name      String
-  repoName  String
-  branch    String
-  framework String?
-  status    String   @default("Imported")
-  githubUrl String
-  userId    String
-  user      User     @relation(fields: [userId], references: [id])
+  id               String       @id @default(cuid())
+  name             String
+  repoName         String
+  branch           String       @default("main")
+  framework        String?
+  language         String?
+  packageManager   String?
+  buildTool        String?
+  buildCommand     String?
+  startCommand     String?
+  port             Int?
+  dockerized       Boolean      @default(false)
+  requiredEnv      String[]
+  deploymentTarget String?      @default("AWS ECS Fargate")
+  confidence       Int?
+  status           String       @default("Imported")
+  configVersion    Int          @default(0)
+  githubUrl        String
+  userId           String
+  user             User         @relation(fields: [userId], references: [id])
+  deployments      Deployment[]
+
+  // Sprint 5 Planning & Blueprint fields
+  cpu            String?
+  memory         String?
+  healthCheck    String?
+  deploymentPlan Json?
+  envConfig      Json?
+
+  // Sprint 6 Containerization & Docker Strategy fields
+  dockerStrategy   String? @default("GENERATE")
+  dockerGenerated  Boolean @default(false)
+  dockerPath       String?
+  dockerValidation Json?
+
+  // Sprint 7 Infrastructure & Terraform fields
+  infrastructureManifest Json?
+  terraformGenerated     Boolean @default(false)
+  terraformPath          String?
+  estimatedCost          String?
+
+  createdAt DateTime @default(now())
+  updatedAt DateTime @default(now()) @updatedAt
+
+  @@index([userId, createdAt])
+}
+
+// Sprint 8 AWS Connection Model (Zero static secret keys; STS AssumeRole only)
+model AwsConnection {
+  id              String   @id @default(cuid())
+  userId          String   @unique
+  user            User     @relation(fields: [userId], references: [id], onDelete: Cascade)
+  roleArn         String?
+  externalId      String?
+  accountId       String?
+  region          String   @default("ap-south-1")
+  accessKeyId     String?
+  secretAccessKey String?
+  sessionToken    String?
+  authType        String   @default("ROLE_ARN") // "ACCESS_KEYS" or "ROLE_ARN"
+  status          String   @default("PENDING")
+  createdAt       DateTime @default(now())
+  updatedAt       DateTime @default(now()) @updatedAt
+}
+
+// Sprint 8 & 9 Real-Time Asynchronous Deployment Queue & Worker Model
+model Deployment {
+  id           String    @id @default(cuid())
+  projectId    String
+  project      Project   @relation(fields: [projectId], references: [id], onDelete: Cascade)
+  status       String    @default("QUEUED")
+  stage        String    @default("QUEUED")
+  currentStep  String?   @default("QUEUED")
+  liveUrl      String?
+  healthStatus String?   @default("UNKNOWN")
+  latencyMs    Int?
+  logs         Json?
+  error        String?
+  target       String?
+  configVersion Int?
+  resources    Json?
+  artifactPath String?
+  workerJobId  String?   @unique
+  retryOfId    String?
+  rollbackOriginalStatus String?
+  teardownResources      Json?
+  teardownDeploymentIds  Json?
+  startedAt    DateTime?
+  completedAt  DateTime?
+  createdAt    DateTime  @default(now())
+  updatedAt    DateTime  @default(now()) @updatedAt
+
+  @@index([projectId, createdAt])
+  @@index([projectId, status])
 }

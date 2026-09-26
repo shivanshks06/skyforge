@@ -1,3 +1,5 @@
+import { useId } from "react";
+
 export default function Input({
   label,
   error,
@@ -6,10 +8,13 @@ export default function Input({
   containerClassName = "",
   ...props
 }) {
+  const generatedId = useId();
+  const inputId = props.id || generatedId;
+  const errorId = `${inputId}-error`;
   return (
     <div className={`flex flex-col gap-1.5 ${containerClassName}`}>
       {label && (
-        <label className="text-xs font-medium text-[#5E4C3E]">
+        <label htmlFor={inputId} className="text-xs font-medium text-[#5E4C3E]">
           {label}
         </label>
       )}
@@ -20,6 +25,9 @@ export default function Input({
           </div>
         )}
         <input
+          id={inputId}
+          aria-invalid={error ? "true" : undefined}
+          aria-describedby={error ? errorId : undefined}
           {...props}
           className={`w-full rounded-xl border border-[#DCD0C3] bg-white px-4 py-3 text-sm text-[#362217] placeholder-[#A39284] outline-none transition-all duration-200 focus:border-[#9E5D2D] focus:bg-white focus:ring-2 focus:ring-[#9E5D2D]/20 ${
             Icon ? "pl-10" : ""
@@ -27,7 +35,7 @@ export default function Input({
         />
       </div>
       {error && (
-        <span className="text-xs font-medium text-red-600">
+        <span id={errorId} className="text-xs font-medium text-red-600">
           {error}
         </span>
       )}

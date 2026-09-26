@@ -1,4 +1,3 @@
-import jwt from "jsonwebtoken";
 import prisma from "../config/db.js";
 import {
   generatePKCE,
@@ -6,223 +5,182 @@ import {
   exchangeCodeForToken,
   getGitHubUserProfile,
   getUserRepositories,
+  revokeGitHubToken,
 } from "../services/githubService.js";
 import { analyzeRepository } from "../services/deploymentEngine.js";
+import { decryptSecret, encryptSecret } from "../services/secretService.js";
 
-/**
- * Helper to parse cookies from request headers.
- */
-const parseCookies = (req) => {
-  const list = {};
-  const rc = req.headers.cookie;
-  if (rc) {
-    rc.split(";").forEach((cookie) => {
-      const parts = cookie.split("=");
-      list[parts.shift().trim()] = decodeURIComponent(parts.join("="));
-    });
-  }
-  return list;
-};
+function parseCookies(req) {
+  return (req.headers.cookie || "").split(";").reduce((cookies, item) => {
+    const separator = item.indexOf("=");
+    if (separator < 0) return cookies;
+    const key = item.slice(0, separator).trim();
+    const value = item.slice(separator + 1);
+    try {
+      cookies[key] = decodeURIComponent(value);
+    } catch {
+      cookies[key] = value;
+    }
+    return cookies;
+  }, {});
+}
 
-/**
- * GET /api/github/login
- * Initiates GitHub OAuth PKCE flow.
- */
+function clientUrl(pathname = "/dashboard") {
+  const configured = String(process.env.CLIENT_URL || "http://localhost:5173").split(",")[0].trim();
+  const url = new URL(pathname, configured);
+  return url.toString();
+}
+
+function secureOAuthCookies() {
+  const configured = String(process.env.CLIENT_URL || "").split(",")[0].trim();
+  const localClient = /^https?:\/\/(?:localhost|127\.0\.0\.1)(?::\d+)?(?:\/|$)/i.test(configured);
+  return process.env.NODE_ENV === "production" && !localClient;
+}
+
+function clearOAuthCookie(res, name) {
+  res.cookie(name, "", {
+    httpOnly: true,
+    secure: secureOAuthCookies(),
+    sameSite: "lax",
+    path: "/",
+    maxAge: 0,
+  });
+}
+
 export const githubLogin = async (req, res) => {
   try {
+    const userId = req.user?.id;
+    if (!userId) return res.status(401).json({ message: "Authentication required" });
+
     const { codeVerifier, codeChallenge, state } = generatePKCE();
-
-    // Extract user ID from token passed via query, header, or cookie
-    let userId = req.query.userId || null;
-    const tokenStr = req.query.token || (req.headers.authorization?.startsWith("Bearer ") ? req.headers.authorization.split(" ")[1] : null);
-
-    if (tokenStr) {
-      try {
-        const decoded = jwt.verify(tokenStr, process.env.JWT_SECRET);
-        userId = decoded.userId;
-      } catch (err) {
-        console.warn("JWT verification error in githubLogin:", err.message);
-      }
-    }
-
-    const statePayload = userId ? `${state}_${userId}` : state;
-
-    res.cookie("github_oauth_state", statePayload, {
+    const statePayload = `${state}.${userId}`;
+    const cookieOptions = {
       httpOnly: true,
-      secure: process.env.NODE_ENV === "production",
+      secure: secureOAuthCookies(),
       maxAge: 10 * 60 * 1000,
       sameSite: "lax",
-    });
+      path: "/",
+    };
 
-    res.cookie("github_code_verifier", codeVerifier, {
-      httpOnly: true,
-      secure: process.env.NODE_ENV === "production",
-      maxAge: 10 * 60 * 1000,
-      sameSite: "lax",
-    });
+    res.cookie("github_oauth_state", statePayload, cookieOptions);
+    res.cookie("github_code_verifier", codeVerifier, cookieOptions);
 
     const authUrl = buildGitHubAuthUrl({ codeChallenge, state: statePayload });
-
     if (req.query.format === "json") {
-      return res.json({
-        url: authUrl,
-        state: statePayload,
-        codeChallenge,
-        codeChallengeMethod: "S256",
-      });
+      return res.json({ url: authUrl, state: statePayload, codeChallenge, codeChallengeMethod: "S256" });
     }
-
     return res.redirect(authUrl);
   } catch (error) {
     console.error("Error in githubLogin:", error);
-    return res.status(500).json({
-      message: "Failed to initiate GitHub authorization",
-      error: error.message,
-    });
+    return res.status(500).json({ message: "Failed to initiate GitHub authorization" });
   }
 };
 
-/**
- * GET /api/github/callback
- * Handles OAuth callback, exchanges code for access token, fetches profile & saves GitHubAccount.
- */
 export const githubCallback = async (req, res) => {
   try {
     const { code, state } = req.query;
-
-    if (!code) {
-      return res.status(400).json({ message: "Authorization code missing in callback." });
-    }
-
     const cookies = parseCookies(req);
-    const codeVerifier = cookies.github_code_verifier;
-
-    // Determine target User ID from state or database
-    let targetUserId = null;
-    if (state && state.includes("_")) {
-      targetUserId = state.split("_")[1];
+    if (!code) return res.status(400).json({ message: "Authorization code missing in callback." });
+    if (!state || !cookies.github_oauth_state || state !== cookies.github_oauth_state) {
+      return res.status(400).json({ message: "GitHub OAuth state validation failed." });
     }
 
-    if (!targetUserId) {
-      // Fallback: search for last active user in DB
-      const user = await prisma.user.findFirst({ orderBy: { createdAt: "desc" } });
-      if (user) {
-        targetUserId = user.id;
-      }
-    }
+    const separator = state.lastIndexOf(".");
+    const targetUserId = separator > 0 ? state.slice(separator + 1) : "";
+    const user = await prisma.user.findUnique({ where: { id: targetUserId }, select: { id: true } });
+    if (!user) return res.status(400).json({ message: "OAuth user no longer exists." });
 
-    if (!targetUserId) {
-      return res.status(400).json({ message: "User association failed. Please log in first." });
-    }
-
-    // 1. Exchange OAuth code + code_verifier for Access Token
     const accessToken = await exchangeCodeForToken({
       code,
-      codeVerifier: codeVerifier || undefined,
+      codeVerifier: cookies.github_code_verifier,
     });
-
-    // 2. Fetch GitHub User Profile
     const githubUser = await getGitHubUserProfile(accessToken);
+    const githubId = String(githubUser.id);
 
-    // 3. Clean up any existing GitHubAccount records for this githubId or targetUserId to avoid unique constraint issues
-    await prisma.gitHubAccount.deleteMany({
-      where: {
-        OR: [
-          { githubId: String(githubUser.id) },
-          { userId: targetUserId }
-        ]
+    await prisma.$transaction(async (tx) => {
+      const existingGithubAccount = await tx.gitHubAccount.findUnique({ where: { githubId } });
+      if (existingGithubAccount && existingGithubAccount.userId !== targetUserId) {
+        throw new Error("This GitHub account is already linked to another SkyForge user.");
       }
+
+      await tx.gitHubAccount.upsert({
+        where: { userId: targetUserId },
+        update: {
+          githubId,
+          username: githubUser.login,
+          accessToken: encryptSecret(accessToken),
+        },
+        create: {
+          userId: targetUserId,
+          githubId,
+          username: githubUser.login,
+          accessToken: encryptSecret(accessToken),
+        },
+      });
     });
 
-    // 4. Save GitHubAccount linked directly to the target User
-    const githubAccount = await prisma.gitHubAccount.create({
-      data: {
-        userId: targetUserId,
-        githubId: String(githubUser.id),
-        username: githubUser.login,
-        accessToken: accessToken,
-      },
-    });
+    clearOAuthCookie(res, "github_oauth_state");
+    clearOAuthCookie(res, "github_code_verifier");
 
     if (req.query.format === "json") {
-      return res.json({
-        message: "GitHub account linked successfully",
-        account: githubAccount,
-      });
+      return res.json({ message: "GitHub account linked successfully", github: { githubId, username: githubUser.login } });
     }
-
-    // Redirect user back to Dashboard with success indicator
-    return res.redirect("http://localhost:5173/dashboard?github=connected");
+    return res.redirect(clientUrl("/dashboard?github=connected"));
   } catch (error) {
-    console.error("Error in githubCallback:", error);
-    return res.status(500).json({
-      message: "GitHub OAuth callback failed",
-      error: error.message,
-    });
+    clearOAuthCookie(res, "github_oauth_state");
+    clearOAuthCookie(res, "github_code_verifier");
+    console.error("Error in githubCallback:", error.response?.status || error.message);
+    return res.status(400).json({ message: error.response?.data?.error_description || error.message || "GitHub OAuth callback failed" });
   }
 };
 
-/**
- * GET /api/github/repos
- * Protected route to fetch repositories of the connected GitHub account.
- */
 export const getRepos = async (req, res) => {
   try {
-    const userId = req.user.id;
-
-    const account = await prisma.gitHubAccount.findUnique({
-      where: { userId },
-    });
-
-    if (!account) {
-      return res.status(404).json({
-        message: "No connected GitHub account found. Please connect GitHub first.",
-      });
-    }
-
-    const repos = await getUserRepositories(account.accessToken);
-
+    const account = await prisma.gitHubAccount.findUnique({ where: { userId: req.user.id } });
+    if (!account) return res.status(404).json({ message: "No connected GitHub account found." });
+    const repos = await getUserRepositories(decryptSecret(account.accessToken));
     return res.json(repos);
   } catch (error) {
-    console.error("Error in getRepos:", error);
-    return res.status(500).json({
-      message: "Failed to fetch GitHub repositories",
-      error: error.message,
-    });
+    console.error("Error in getRepos:", error.response?.status || error.message);
+    return res.status(500).json({ message: "Failed to fetch GitHub repositories" });
   }
 };
 
-/**
- * POST /api/github/analyze
- * Scans repository file tree, detects framework, env variables, ports, package manager, and builds deployment plan.
- */
+export const disconnectGithub = async (req, res) => {
+  try {
+    const account = await prisma.gitHubAccount.findUnique({ where: { userId: req.user.id } });
+    if (account) {
+      await revokeGitHubToken(decryptSecret(account.accessToken)).catch((error) => {
+        console.warn(`[GITHUB] Token revocation failed: ${error.message}`);
+      });
+      await prisma.gitHubAccount.delete({ where: { userId: req.user.id } });
+    }
+    return res.json({ message: "GitHub account disconnected successfully." });
+  } catch (error) {
+    console.error("Error in disconnectGithub:", error.message);
+    return res.status(500).json({ message: "Failed to disconnect GitHub account" });
+  }
+};
+
 export const analyzeRepo = async (req, res) => {
   try {
-    const { owner, repo, branch = "main" } = req.body;
-
-    if (!owner || !repo) {
-      return res.status(400).json({
-        message: "Repository owner and repo name are required.",
-      });
+    const owner = String(req.body?.owner || "").trim();
+    const repo = String(req.body?.repo || "").trim();
+    const branch = String(req.body?.branch || "main").trim();
+    if (!/^[\w.-]+$/.test(owner) || !/^[\w.-]+$/.test(repo) || [owner, repo].some((value) => value === "." || value === "..") || !/^[\w./-]+$/.test(branch) || branch.length > 255 || branch.includes("..")) {
+      return res.status(400).json({ message: "Repository owner, name, and branch are invalid." });
     }
 
-    let token = null;
-    if (req.user?.id) {
-      const account = await prisma.gitHubAccount.findUnique({
-        where: { userId: req.user.id },
-      });
-      if (account) {
-        token = account.accessToken;
-      }
-    }
-
+    const account = await prisma.gitHubAccount.findUnique({ where: { userId: req.user.id } });
+    const token = account ? decryptSecret(account.accessToken) : null;
     const report = await analyzeRepository({ owner, repo, branch, token });
+
+    if (!report?.detection) {
+      return res.status(422).json({ message: "Repository could not be analyzed. Verify access and branch name." });
+    }
     return res.json(report);
   } catch (error) {
-    console.error("Error analyzing repository:", error);
-    return res.status(500).json({
-      message: "Failed to analyze repository",
-      error: error.message,
-    });
+    console.error("Error analyzing repository:", error.message);
+    return res.status(500).json({ message: "Failed to analyze repository" });
   }
 };

@@ -1,0 +1,93 @@
+name: CI
+
+on:
+  push:
+  pull_request:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: skyforge-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  client:
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: client
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+          cache-dependency-path: client/package-lock.json
+      - run: npm ci
+      - run: npm run lint
+      - run: npm run build
+      - run: npm audit --omit=dev --audit-level=high
+
+  server:
+    runs-on: ubuntu-latest
+    services:
+      postgres:
+        image: postgres:16
+        env:
+          POSTGRES_USER: skyforge
+          POSTGRES_PASSWORD: skyforge
+          POSTGRES_DB: skyforge
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd="pg_isready -U skyforge -d skyforge"
+          --health-interval=5s
+          --health-timeout=5s
+          --health-retries=20
+      redis:
+        image: redis:7-alpine
+        ports:
+          - 6379:6379
+        options: >-
+          --health-cmd="redis-cli ping"
+          --health-interval=5s
+          --health-timeout=3s
+          --health-retries=20
+    defaults:
+      run:
+        working-directory: server
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+          cache-dependency-path: server/package-lock.json
+      - run: npm ci
+      - run: npm run prisma:generate
+      - run: npm run db:validate
+        env:
+          DATABASE_URL: postgresql://skyforge:skyforge@localhost:5432/skyforge
+      - run: npm run db:migrate
+        env:
+          DATABASE_URL: postgresql://skyforge:skyforge@localhost:5432/skyforge
+      - run: npm test
+        env:
+          DATABASE_URL: postgresql://skyforge:skyforge@localhost:5432/skyforge
+          REDIS_URL: redis://localhost:6379
+      - run: npm run check
+      - run: npm audit --omit=dev --audit-level=high
+
+  docker:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Build client image
+        run: docker build --tag skyforge-client:ci client
+      - name: Build API and worker image
+        run: docker build --file server/Dockerfile --build-arg INSTALL_DOCKER_CLI=true --tag skyforge-server:ci server
+      - name: Validate Compose configuration
+        run: |
+          cp server/.env.example server/.env
+          POSTGRES_PASSWORD=ci-only-password docker compose config --quiet

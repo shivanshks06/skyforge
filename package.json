@@ -1,0 +1,22 @@
+{
+  "name": "skyforge",
+  "private": true,
+  "version": "1.0.0",
+  "description": "SkyForge deployment platform",
+  "scripts": {
+    "install:all": "npm --prefix client ci && npm --prefix server ci",
+    "dev:client": "npm --prefix client run dev",
+    "dev:api": "npm --prefix server run dev",
+    "dev:worker": "npm --prefix server run start:worker",
+    "build": "npm --prefix client run build",
+    "lint": "npm --prefix client run lint",
+    "test": "npm --prefix server test",
+    "db:generate": "npm --prefix server run prisma:generate",
+    "db:migrate": "npm --prefix server run db:migrate",
+    "db:validate": "npm --prefix server run db:validate",
+    "check": "npm run lint && npm run build && npm --prefix server run check && npm run test && npm run db:validate"
+  },
+  "engines": {
+    "node": ">=22.13.0"
+  }
+}

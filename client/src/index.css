@@ -94,3 +94,33 @@
 .animate-pulse-slow {
   animation: pulse-slow 4s ease-in-out infinite;
 }
+
+@keyframes skyforge-fade-in {
+  from { opacity: 0; }
+  to { opacity: 1; }
+}
+
+@keyframes skyforge-slide-in {
+  from { opacity: 0; transform: translateY(-1rem); }
+  to { opacity: 1; transform: translateY(0); }
+}
+
+@keyframes skyforge-zoom-in {
+  from { opacity: 0; transform: scale(0.95); }
+  to { opacity: 1; transform: scale(1); }
+}
+
+.animate-in { animation: skyforge-fade-in 180ms ease-out both; }
+.fade-in { animation: skyforge-fade-in 180ms ease-out both; }
+.slide-in-from-top-4 { animation: skyforge-slide-in 220ms ease-out both; }
+.zoom-in-95 { animation: skyforge-zoom-in 180ms ease-out both; }
+.scrollbar-thin { scrollbar-width: thin; }
+
+@media (prefers-reduced-motion: reduce) {
+  *, *::before, *::after {
+    animation-duration: 0.01ms !important;
+    animation-iteration-count: 1 !important;
+    scroll-behavior: auto !important;
+    transition-duration: 0.01ms !important;
+  }
+}
