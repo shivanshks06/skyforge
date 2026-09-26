@@ -2,29 +2,53 @@
   "name": "server",
   "version": "1.0.0",
   "description": "",
-  "main": "index.js",
+  "main": "server.js",
   "scripts": {
-    "test": "echo \"Error: no test specified\" && exit 1",
-    "dev": "nodemon server.js",
-    "start": "node server.js"
+    "test": "node --test test/*.test.js",
+    "dev": "node --dns-result-order=ipv4first server.js",
+    "start": "node --dns-result-order=ipv4first server.js",
+    "start:worker": "node --dns-result-order=ipv4first workers/index.js",
+    "prisma:generate": "prisma generate",
+    "db:migrate": "prisma migrate deploy",
+    "db:validate": "prisma validate",
+    "aws:check": "node scripts/check-aws-connections.mjs",
+    "secrets:encrypt": "node scripts/encrypt-secrets.mjs",
+    "check": "node scripts/check-syntax.mjs"
+  },
+  "engines": {
+    "node": ">=22.13.0"
   },
   "keywords": [],
   "author": "",
   "license": "ISC",
   "type": "module",
   "dependencies": {
+    "@aws-sdk/client-cloudfront": "^3.1138.0",
+    "@aws-sdk/client-cloudwatch-logs": "^3.1139.0",
+    "@aws-sdk/client-ec2": "^3.1138.0",
+    "@aws-sdk/client-ecr": "^3.1138.0",
+    "@aws-sdk/client-ecs": "^3.1138.0",
+    "@aws-sdk/client-elastic-load-balancing-v2": "^3.1138.0",
+    "@aws-sdk/client-iam": "^3.1138.0",
+    "@aws-sdk/client-s3": "^3.1138.0",
+    "@aws-sdk/client-secrets-manager": "^3.1140.0",
+    "@aws-sdk/client-sts": "^3.1138.0",
+    "@google/genai": "^2.24.0",
     "@prisma/adapter-pg": "^7.10.0",
     "@prisma/client": "^7.10.0",
     "axios": "^1.20.0",
     "bcrypt": "^6.0.0",
+    "bullmq": "^6.3.8",
     "cors": "^2.8.6",
     "dotenv": "^17.4.2",
     "express": "^5.2.1",
+    "helmet": "^8.3.0",
+    "ioredis": "^6.0.0",
     "jsonwebtoken": "^9.0.3",
-    "pg": "^8.23.0"
+    "pg": "^8.23.0",
+    "tar": "^7.5.22"
   },
   "devDependencies": {
-    "nodemon": "^3.1.14",
     "prisma": "^7.10.0"
   }
 }

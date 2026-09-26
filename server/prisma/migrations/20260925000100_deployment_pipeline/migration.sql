@@ -1,0 +1,114 @@
+-- Persist the deployment-planning, containerization, infrastructure, AWS connection,
+-- and asynchronous deployment data introduced after the initial project import flow.
+-- The IF NOT EXISTS guards make this migration safe for development databases that
+-- were previously changed with `prisma db push` while remaining correct for fresh DBs.
+
+ALTER TABLE "Project"
+ADD COLUMN IF NOT EXISTS "language" TEXT,
+ADD COLUMN IF NOT EXISTS "packageManager" TEXT,
+ADD COLUMN IF NOT EXISTS "buildTool" TEXT,
+ADD COLUMN IF NOT EXISTS "buildCommand" TEXT,
+ADD COLUMN IF NOT EXISTS "startCommand" TEXT,
+ADD COLUMN IF NOT EXISTS "port" INTEGER,
+ADD COLUMN IF NOT EXISTS "dockerized" BOOLEAN NOT NULL DEFAULT false,
+ADD COLUMN IF NOT EXISTS "requiredEnv" TEXT[] NOT NULL DEFAULT ARRAY[]::TEXT[],
+ADD COLUMN IF NOT EXISTS "deploymentTarget" TEXT DEFAULT 'AWS ECS Fargate',
+ADD COLUMN IF NOT EXISTS "confidence" INTEGER,
+ADD COLUMN IF NOT EXISTS "cpu" TEXT,
+ADD COLUMN IF NOT EXISTS "memory" TEXT,
+ADD COLUMN IF NOT EXISTS "healthCheck" TEXT,
+ADD COLUMN IF NOT EXISTS "deploymentPlan" JSONB,
+ADD COLUMN IF NOT EXISTS "envConfig" JSONB,
+ADD COLUMN IF NOT EXISTS "dockerStrategy" TEXT DEFAULT 'GENERATE',
+ADD COLUMN IF NOT EXISTS "dockerGenerated" BOOLEAN NOT NULL DEFAULT false,
+ADD COLUMN IF NOT EXISTS "dockerPath" TEXT,
+ADD COLUMN IF NOT EXISTS "dockerValidation" JSONB,
+ADD COLUMN IF NOT EXISTS "infrastructureManifest" JSONB,
+ADD COLUMN IF NOT EXISTS "terraformGenerated" BOOLEAN NOT NULL DEFAULT false,
+ADD COLUMN IF NOT EXISTS "terraformPath" TEXT,
+ADD COLUMN IF NOT EXISTS "estimatedCost" TEXT,
+ADD COLUMN IF NOT EXISTS "createdAt" TIMESTAMP(3) NOT NULL DEFAULT CURRENT_TIMESTAMP,
+ADD COLUMN IF NOT EXISTS "updatedAt" TIMESTAMP(3) NOT NULL DEFAULT CURRENT_TIMESTAMP;
+
+ALTER TABLE "Project" ALTER COLUMN "branch" SET DEFAULT 'main';
+ALTER TABLE "Project" ALTER COLUMN "requiredEnv" DROP DEFAULT;
+
+CREATE TABLE IF NOT EXISTS "AwsConnection" (
+    "id" TEXT NOT NULL,
+    "userId" TEXT NOT NULL,
+    "roleArn" TEXT,
+    "externalId" TEXT,
+    "accountId" TEXT,
+    "region" TEXT NOT NULL DEFAULT 'ap-south-1',
+    "accessKeyId" TEXT,
+    "secretAccessKey" TEXT,
+    "sessionToken" TEXT,
+    "authType" TEXT NOT NULL DEFAULT 'ROLE_ARN',
+    "status" TEXT NOT NULL DEFAULT 'PENDING',
+    "createdAt" TIMESTAMP(3) NOT NULL DEFAULT CURRENT_TIMESTAMP,
+    "updatedAt" TIMESTAMP(3) NOT NULL DEFAULT CURRENT_TIMESTAMP,
+    CONSTRAINT "AwsConnection_pkey" PRIMARY KEY ("id")
+);
+
+CREATE TABLE IF NOT EXISTS "Deployment" (
+    "id" TEXT NOT NULL,
+    "projectId" TEXT NOT NULL,
+    "status" TEXT NOT NULL DEFAULT 'QUEUED',
+    "stage" TEXT NOT NULL DEFAULT 'QUEUED',
+    "currentStep" TEXT DEFAULT 'QUEUED',
+    "liveUrl" TEXT,
+    "healthStatus" TEXT DEFAULT 'UNKNOWN',
+    "latencyMs" INTEGER,
+    "logs" JSONB,
+    "error" TEXT,
+    "target" TEXT,
+    "resources" JSONB,
+    "artifactPath" TEXT,
+    "startedAt" TIMESTAMP(3),
+    "completedAt" TIMESTAMP(3),
+    "createdAt" TIMESTAMP(3) NOT NULL DEFAULT CURRENT_TIMESTAMP,
+    "updatedAt" TIMESTAMP(3) NOT NULL DEFAULT CURRENT_TIMESTAMP,
+    CONSTRAINT "Deployment_pkey" PRIMARY KEY ("id")
+);
+
+ALTER TABLE "AwsConnection"
+ADD COLUMN IF NOT EXISTS "roleArn" TEXT,
+ADD COLUMN IF NOT EXISTS "externalId" TEXT,
+ADD COLUMN IF NOT EXISTS "accountId" TEXT,
+ADD COLUMN IF NOT EXISTS "region" TEXT DEFAULT 'ap-south-1',
+ADD COLUMN IF NOT EXISTS "accessKeyId" TEXT,
+ADD COLUMN IF NOT EXISTS "secretAccessKey" TEXT,
+ADD COLUMN IF NOT EXISTS "sessionToken" TEXT,
+ADD COLUMN IF NOT EXISTS "authType" TEXT DEFAULT 'ROLE_ARN',
+ADD COLUMN IF NOT EXISTS "status" TEXT DEFAULT 'PENDING',
+ADD COLUMN IF NOT EXISTS "createdAt" TIMESTAMP(3) NOT NULL DEFAULT CURRENT_TIMESTAMP,
+ADD COLUMN IF NOT EXISTS "updatedAt" TIMESTAMP(3) NOT NULL DEFAULT CURRENT_TIMESTAMP;
+
+ALTER TABLE "Deployment"
+ADD COLUMN IF NOT EXISTS "status" TEXT DEFAULT 'QUEUED',
+ADD COLUMN IF NOT EXISTS "stage" TEXT DEFAULT 'QUEUED',
+ADD COLUMN IF NOT EXISTS "currentStep" TEXT DEFAULT 'QUEUED',
+ADD COLUMN IF NOT EXISTS "liveUrl" TEXT,
+ADD COLUMN IF NOT EXISTS "healthStatus" TEXT DEFAULT 'UNKNOWN',
+ADD COLUMN IF NOT EXISTS "latencyMs" INTEGER,
+ADD COLUMN IF NOT EXISTS "logs" JSONB,
+ADD COLUMN IF NOT EXISTS "error" TEXT,
+ADD COLUMN IF NOT EXISTS "target" TEXT,
+ADD COLUMN IF NOT EXISTS "resources" JSONB,
+ADD COLUMN IF NOT EXISTS "artifactPath" TEXT,
+ADD COLUMN IF NOT EXISTS "startedAt" TIMESTAMP(3),
+ADD COLUMN IF NOT EXISTS "completedAt" TIMESTAMP(3),
+ADD COLUMN IF NOT EXISTS "createdAt" TIMESTAMP(3) NOT NULL DEFAULT CURRENT_TIMESTAMP,
+ADD COLUMN IF NOT EXISTS "updatedAt" TIMESTAMP(3) NOT NULL DEFAULT CURRENT_TIMESTAMP;
+
+CREATE UNIQUE INDEX IF NOT EXISTS "AwsConnection_userId_key" ON "AwsConnection"("userId");
+
+DO $$
+BEGIN
+  IF NOT EXISTS (SELECT 1 FROM pg_constraint WHERE conname = 'AwsConnection_userId_fkey') THEN
+    ALTER TABLE "AwsConnection" ADD CONSTRAINT "AwsConnection_userId_fkey" FOREIGN KEY ("userId") REFERENCES "User"("id") ON DELETE CASCADE ON UPDATE CASCADE;
+  END IF;
+  IF NOT EXISTS (SELECT 1 FROM pg_constraint WHERE conname = 'Deployment_projectId_fkey') THEN
+    ALTER TABLE "Deployment" ADD CONSTRAINT "Deployment_projectId_fkey" FOREIGN KEY ("projectId") REFERENCES "Project"("id") ON DELETE CASCADE ON UPDATE CASCADE;
+  END IF;
+END $$;

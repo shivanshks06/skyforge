@@ -1,16 +1,13 @@
 import Navbar from "../components/Navbar";
-import Button from "../components/Button";
 import Card from "../components/Card";
 import { Link } from "react-router-dom";
 import { 
   Sparkles, 
   ArrowRight, 
-  Cloud, 
-  GitBranch, 
-  Zap, 
-  Terminal, 
+  Cloud,
+  GitBranch,
+  Zap,
   Activity, 
-  CheckCircle2 
 } from "lucide-react";
 
 export default function Landing() {
@@ -30,7 +27,7 @@ export default function Landing() {
     {
       icon: GitBranch,
       title: "GitHub Automation",
-      description: "Connect your repositories. SkyForge configures automated CI/CD preview environments for every pull request.",
+      description: "Connect your repositories. SkyForge builds, verifies, and deploys the project you select.",
       color: "text-[#767E56] bg-[#767E56]/10 border-[#767E56]/20"
     },
     {
@@ -75,40 +72,32 @@ export default function Landing() {
 
           {/* CTA Group */}
           <div className="mt-10 flex flex-col sm:flex-row gap-4 w-full sm:w-auto">
-            <Link to="/signup" className="w-full sm:w-auto">
-              <Button size="lg" icon={ArrowRight} className="w-full sm:w-auto px-8 text-lg">
-                Start Deploying Free
-              </Button>
+            <Link
+              to="/signup"
+              className="inline-flex w-full items-center justify-center gap-2 rounded-xl border border-[#8B5024] bg-[#9E5D2D] px-8 py-2.5 text-lg font-medium text-white shadow-md transition hover:bg-[#8B5024] sm:w-auto"
+            >
+              Start Deploying Free <ArrowRight className="h-4 w-4" />
             </Link>
-            <a href="#features" className="w-full sm:w-auto">
-              <Button size="lg" variant="outline" className="w-full sm:w-auto px-8 text-lg">
-                &gt;_ Explore Platform
-              </Button>
+            <a
+              href="#features"
+              className="inline-flex w-full items-center justify-center rounded-xl border-2 border-[#362217] bg-white px-8 py-2.5 text-lg font-semibold text-[#362217] transition hover:bg-[#F4EFEA] sm:w-auto"
+            >
+              &gt;_ Explore Platform
             </a>
           </div>
 
-          {/* Live Mockup Terminal Card */}
-          <div className="mt-16 w-full max-w-6xl overflow-hidden rounded-2xl border border-[#DCD0C3] bg-white shadow-2xl shadow-[#362217]/5">
-            <div className="flex items-center justify-between border-b border-[#2C1A10] bg-[#362217] px-5 py-3.5">
-              <div className="flex items-center gap-2">
-                <div className="h-3.5 w-3.5 rounded-full bg-red-500" />
-                <div className="h-3.5 w-3.5 rounded-full bg-amber-500" />
-                <div className="h-3.5 w-3.5 rounded-full bg-emerald-500" />
+          <div className="mt-16 grid w-full max-w-6xl grid-cols-1 gap-4 text-left md:grid-cols-3">
+            {[
+              ["01", "Connect a repository", "Choose a GitHub repository and branch. SkyForge reads the project metadata needed to plan a deployment."],
+              ["02", "Review the generated plan", "Inspect the detected runtime, Docker strategy, AWS target, environment variables, and estimated cost."],
+              ["03", "Deploy into your AWS account", "Verify your AWS connection, start the deployment, and follow the real build, rollout, and health-check logs."],
+            ].map(([number, title, description]) => (
+              <div key={number} className="rounded-2xl border border-[#DCD0C3] bg-white p-6 shadow-lg shadow-[#362217]/5">
+                <span className="font-mono text-sm font-bold text-[#9E5D2D]">{number}</span>
+                <h3 className="mt-3 text-xl font-bold text-[#362217]">{title}</h3>
+                <p className="mt-2 text-sm leading-relaxed text-[#5E4C3E]">{description}</p>
               </div>
-              <span className="text-sm font-mono text-[#D9A87E]">skyforge-agent --deploy main</span>
-              <div className="w-12" />
-            </div>
-
-            <div className="p-6 text-left font-mono text-sm sm:text-base leading-relaxed bg-[#F8F4EE] text-[#362217]">
-              <p className="text-[#8C7667]"># Connecting to Repository...</p>
-              <p className="text-[#9E5D2D] font-semibold">✔ GitHub repo: user/fullstack-app linked.</p>
-              <p className="text-[#8C7667]"># Analyzing codebase architecture...</p>
-              <p className="text-[#3B7A75] font-semibold">✔ Detected Node.js (Express) + React Vite frontend.</p>
-              <p className="text-[#767E56] font-semibold">✔ Generated AWS ECS + RDS PostgreSQL Terraform spec.</p>
-              <p className="text-[#2E6B4F] font-bold flex items-center gap-2.5 mt-2">
-                <CheckCircle2 className="h-5 w-5 inline shrink-0" /> Deployment live at https://fullstack-app.skyforge.dev [2.4s]
-              </p>
-            </div>
+            ))}
           </div>
         </section>
 
@@ -141,9 +130,9 @@ export default function Landing() {
           <div className="w-full px-6 sm:px-12 flex flex-col sm:flex-row items-center justify-between gap-4">
             <span>© 2026 SkyForge Inc. All rights reserved.</span>
             <div className="flex gap-6">
-              <a href="#" className="hover:text-[#362217] transition">Privacy Policy</a>
-              <a href="#" className="hover:text-[#362217] transition">Terms of Service</a>
-              <a href="#" className="hover:text-[#362217] transition">Documentation</a>
+              <span className="text-[#8C7667]">Privacy documentation available on request</span>
+              <span className="text-[#8C7667]">Usage terms available on request</span>
+              <span className="text-[#8C7667]">See the project README for documentation</span>
             </div>
           </div>
         </footer>

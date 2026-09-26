@@ -1,6 +1,5 @@
 import { Link } from "react-router-dom";
 import Logo from "./Logo";
-import Button from "./Button";
 import { ArrowRight } from "lucide-react";
 
 export default function Navbar() {
@@ -17,10 +16,11 @@ export default function Navbar() {
             Sign in
           </Link>
 
-          <Link to="/signup">
-            <Button size="sm" icon={ArrowRight}>
-              Get Started
-            </Button>
+          <Link
+            to="/signup"
+            className="inline-flex items-center gap-2 rounded-lg border border-[#8B5024] bg-[#9E5D2D] px-3.5 py-2 text-sm font-medium text-white shadow-md transition hover:bg-[#8B5024]"
+          >
+            Get Started <ArrowRight className="h-4 w-4" />
           </Link>
         </div>
       </div>

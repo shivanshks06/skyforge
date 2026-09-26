@@ -1,7 +1,7 @@
 import { useState, useContext } from "react";
 import { useNavigate, Link } from "react-router-dom";
 import api from "../services/api";
-import { AuthContext } from "../context/AuthContext";
+import { AuthContext } from "../context/authContext.js";
 import Input from "../components/Input";
 import Button from "../components/Button";
 import Logo from "../components/Logo";
@@ -25,7 +25,12 @@ export default function Login() {
       login(res.data.token, res.data.user);
       navigate("/dashboard");
     } catch (err) {
-      setError(err.response?.data?.message || "Invalid email or password.");
+      console.error("Login attempt failed:", err);
+      const networkErr = !err.response && (err.code === "ERR_NETWORK" || err.message?.includes("Network"));
+      setError(
+        err.response?.data?.message ||
+        (networkErr ? "Cannot connect to server. Ensure SkyForge backend is running on port 5000." : "Invalid email or password.")
+      );
     } finally {
       setSubmitting(false);
     }

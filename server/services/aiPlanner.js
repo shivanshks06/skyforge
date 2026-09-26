@@ -1,82 +1,181 @@
+import { GoogleGenAI } from "@google/genai";
+
+const CPU_VALUES = new Set(["0.25 vCPU", "0.5 vCPU", "1 vCPU", "2 vCPU"]);
+const MEMORY_VALUES = new Set(["512 MB", "1 GB", "2 GB", "4 GB"]);
+const FARGATE_MEMORY_BY_CPU = {
+  "0.25 vCPU": ["512 MB"],
+  "0.5 vCPU": ["1 GB"],
+  "1 vCPU": ["2 GB"],
+  "2 vCPU": ["4 GB"],
+};
+
+function isStaticFrontend(framework) {
+  const value = String(framework || "").toLowerCase();
+  return value.includes("react")
+    || value.includes("vue")
+    || value.includes("angular")
+    || (value.includes("svelte") && !value.includes("kit"))
+    || value.includes("static html")
+    || value === "static"
+    || value === "html";
+}
+
+export function normalizePlan(plan, metadata = {}) {
+  const targetValue = String(plan.deploymentTarget || "").toUpperCase();
+  const fallbackTarget = isStaticFrontend(metadata.framework) && !metadata.dockerized ? "AWS_S3_CLOUDFRONT" : "AWS_ECS_FARGATE";
+  const deploymentTarget = targetValue.includes("S3") || targetValue.includes("CLOUDFRONT")
+    ? "AWS_S3_CLOUDFRONT"
+    : targetValue.includes("ECS") || targetValue.includes("FARGATE")
+      ? "AWS_ECS_FARGATE"
+      : fallbackTarget;
+  const cpu = CPU_VALUES.has(plan.cpu) ? plan.cpu : "0.5 vCPU";
+  const compatibleMemory = FARGATE_MEMORY_BY_CPU[cpu] || FARGATE_MEMORY_BY_CPU["0.5 vCPU"];
+  const memory = MEMORY_VALUES.has(plan.memory) && compatibleMemory.includes(plan.memory)
+    ? plan.memory
+    : compatibleMemory[0];
+  const healthCheck = typeof plan.healthCheck === "string" && /^\/[A-Za-z0-9/_-]*$/.test(plan.healthCheck) ? plan.healthCheck : "/";
+  return {
+    ...plan,
+    deploymentTarget,
+    cpu,
+    memory,
+    healthCheck,
+    dockerStrategy: metadata.dockerized ? "EXISTING" : "GENERATE",
+  };
+}
+
 /**
- * Deployment Planner (AI / Rule-based Hybrid Engine)
- * Generates Dockerfile specifications and infrastructure configuration based on detection results.
+ * AI Deployment Planner Engine (Sprint 5)
+ * Uses Gemini to generate structured infrastructure decisions, with a deterministic
+ * fallback whenever the optional AI integration is unavailable.
  */
 
-export async function generateDeploymentPlan(detectionResult) {
-  const { framework, language, buildCommand, startCommand, packageManager, port, dockerized } = detectionResult;
+export const AI_MODEL = process.env.GEMINI_MODEL?.trim() || "gemini-3.8-flash";
 
-  if (dockerized) {
-    return {
-      source: "Existing Dockerfile",
-      recommendedAction: "Use existing Dockerfile found in repository root.",
-      dockerfile: "# Using existing Dockerfile from repository",
-      port,
-      environmentConfig: detectionResult.requiredEnv,
-    };
+export async function generateAiDeploymentPlan(metadata) {
+  const {
+    framework = "Generic",
+    language = "JavaScript",
+    packageManager = "npm",
+    buildCommand = "",
+    startCommand = "",
+    port = 80,
+    dockerized = false,
+    requiredEnv = [],
+  } = metadata;
+
+  // Senior DevOps System Prompt
+  const prompt = `You are a senior DevOps engineer and cloud architect.
+Analyze this repository metadata and output structured infrastructure decisions for AWS deployment.
+
+Repository Metadata:
+Framework: ${framework}
+Language: ${language}
+Package Manager: ${packageManager}
+Build Command: ${buildCommand || "None"}
+Start Command: ${startCommand || "Default"}
+Port: ${port}
+Docker Exists: ${Boolean(dockerized)}
+Required Environment Variables: ${Array.isArray(requiredEnv) ? requiredEnv.join(", ") : "None"}
+
+Return ONLY valid JSON matching this schema exactly:
+{
+  "deploymentTarget": "AWS_ECS_FARGATE",
+  "cpu": "0.5 vCPU",
+  "memory": "1 GB",
+  "healthCheck": "/",
+  "dockerStrategy": "${dockerized ? "EXISTING" : "GENERATE"}",
+  "terraformStrategy": "FARGATE_TEMPLATE",
+  "explanation": "Explain the selected target and sizing."
+}
+
+Rules:
+1. Choose AWS_S3_CLOUDFRONT for a static frontend without a server runtime; otherwise choose AWS_ECS_FARGATE.
+2. Use only these CPU values: 0.25 vCPU, 0.5 vCPU, 1 vCPU, 2 vCPU.
+3. Use only these memory values: 512 MB, 1 GB, 2 GB, 4 GB.
+4. healthCheck must be an absolute path containing only letters, numbers, slash, underscore, or hyphen.
+5. Never return markdown or backticks (no \`\`\`json).
+6. Never explain outside the JSON object.
+7. Return raw JSON ONLY.`;
+
+  const apiKey = process.env.GEMINI_API_KEY;
+  if (apiKey) {
+    const ai = new GoogleGenAI({ apiKey });
+    const candidateModels = [...new Set([
+      AI_MODEL,
+      "gemini-3.7-flash",
+      "gemini-3.5-flash-lite",
+      "gemini-flash-latest",
+    ])];
+
+    for (const modelName of candidateModels) {
+      try {
+        const response = await ai.models.generateContent({
+          model: modelName,
+          contents: prompt,
+          config: {
+            responseMimeType: "application/json",
+            temperature: 0.2,
+          },
+        });
+
+        if (response?.text) {
+          const cleanedText = response.text.replace(/```json/g, "").replace(/```/g, "").trim();
+          const parsed = JSON.parse(cleanedText);
+          if (parsed && typeof parsed === "object") {
+            return {
+              ...normalizePlan(parsed, metadata),
+              source: `Gemini ${modelName}`,
+              timestamp: new Date().toISOString(),
+            };
+          }
+        }
+      } catch (err) {
+        console.warn(`Gemini model ${modelName} call notice:`, err.message?.slice(0, 150));
+      }
+    }
   }
 
-  let generatedDockerfile = "";
+  // Fallback to maintain system stability if Gemini 2.5 Flash API encounters network or service issues
+  return generateDevOpsFallbackPlan(metadata);
+}
 
-  if (framework === "React" || framework === "Vue") {
-    generatedDockerfile = `FROM node:18-alpine AS builder
-WORKDIR /app
-COPY package*.json ./
-RUN ${packageManager} install
-COPY . .
-RUN ${buildCommand || "npm run build"}
+/**
+ * Deterministic Senior DevOps Fallback Planner
+ * Ensures reliable, instant plans even when offline or during API rate limit spikes.
+ */
+export function generateDevOpsFallbackPlan(metadata) {
+  const { framework = "", port = 80, dockerized = false } = metadata;
+  const isFrontend = isStaticFrontend(framework);
+  const isJava = framework === "Spring Boot";
+  const useStaticHosting = isFrontend && !dockerized;
 
-FROM nginx:alpine
-COPY --from=builder /app/dist /usr/share/nginx/html
-EXPOSE ${port}
-CMD ["nginx", "-g", "daemon off;"]`;
-  } else if (framework === "Next.js") {
-    generatedDockerfile = `FROM node:18-alpine AS runner
-WORKDIR /app
-COPY package*.json ./
-RUN ${packageManager} install
-COPY . .
-RUN ${buildCommand || "npm run build"}
-EXPOSE ${port}
-ENV PORT ${port}
-CMD ["${startCommand || "npm run start"}"]`;
-  } else if (framework === "FastAPI" || framework === "Flask") {
-    generatedDockerfile = `FROM python:3.11-slim
-WORKDIR /app
-COPY requirements.txt ./
-RUN pip install --no-cache-dir -r requirements.txt
-COPY . .
-EXPOSE ${port}
-CMD [${startCommand.split(" ").map(s => `"${s}"`).join(", ")}]`;
-  } else if (framework === "Go") {
-    generatedDockerfile = `FROM golang:1.21-alpine AS builder
-WORKDIR /app
-COPY go.mod ./
-RUN go mod download
-COPY . .
-RUN ${buildCommand || "go build -o main ."}
+  const cpu = isJava ? "1 vCPU" : (isFrontend ? "0.25 vCPU" : "0.5 vCPU");
+  const memory = isJava ? "2 GB" : (isFrontend ? "512 MB" : "1 GB");
+  const healthCheck = "/";
+  const deploymentTarget = useStaticHosting ? "AWS_S3_CLOUDFRONT" : "AWS_ECS_FARGATE";
+  const dockerStrategy = dockerized ? "EXISTING" : "GENERATE";
+  const terraformStrategy = useStaticHosting ? "S3_CLOUDFRONT_TEMPLATE" : "FARGATE_TEMPLATE";
 
-FROM alpine:latest
-WORKDIR /root/
-COPY --from=builder /app/main .
-EXPOSE ${port}
-CMD ["./main"]`;
-  } else {
-    // Default Node.js / Express fallback Dockerfile generator
-    generatedDockerfile = `FROM node:18-alpine
-WORKDIR /app
-COPY package*.json ./
-RUN ${packageManager} install --production
-COPY . .
-EXPOSE ${port}
-CMD ["${startCommand || "node server.js"}"]`;
-  }
+  const explanation = useStaticHosting
+    ? `Recommended private S3 origin with CloudFront HTTPS delivery for a static ${framework || "frontend"} application.`
+    : `Recommended AWS ECS Fargate deployment with ${cpu} and ${memory} memory. ${
+      dockerStrategy === "GENERATE"
+        ? "Automated multi-stage container build optimized with caching and non-root execution."
+        : "Using the existing repository Dockerfile."
+    } Target health check probe configured at ${healthCheck} on port ${port}.`;
 
   return {
-    source: "AI / Automated Generation",
-    recommendedAction: `Automated container spec generated for ${framework} (${language})`,
-    dockerfile: generatedDockerfile,
-    port,
-    environmentConfig: detectionResult.requiredEnv,
+    ...normalizePlan({ deploymentTarget, cpu, memory, healthCheck }, metadata),
+    dockerStrategy,
+    terraformStrategy,
+    explanation,
+    source: "DevOps Intelligence Engine",
+    timestamp: new Date().toISOString(),
   };
+}
+
+// Retain legacy method for backward compatibility
+export async function generateDeploymentPlan(detectionResult) {
+  return generateAiDeploymentPlan(detectionResult);
 }
