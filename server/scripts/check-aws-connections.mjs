@@ -1,9 +1,11 @@
-import "dotenv/config";
+import "../config/env.js";
 import { GetCallerIdentityCommand, STSClient } from "@aws-sdk/client-sts";
 import prisma from "../config/db.js";
 import { getAwsCredentials } from "../services/awsConnectionService.js";
 
+// NOT_CONNECTED rows are placeholders created when a user opens Settings; only verify real connections.
 const connections = await prisma.awsConnection.findMany({
+  where: { status: "CONNECTED" },
   select: {
     userId: true,
     status: true,

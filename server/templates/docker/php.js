@@ -1,12 +1,20 @@
+/**
+ * PHP Dockerfile generator (Laravel, Symfony, WordPress-style and plain PHP sites) on Apache.
+ * The document root is public/ when the project has one, otherwise the repository root.
+ */
 export function generatePhpDockerfile(metadata = {}) {
-  const { port = 8000 } = metadata;
+  const { port = 8000, framework = "" } = metadata;
+  const docRoot = metadata.docRoot ?? (String(framework).toLowerCase().includes("laravel") ? "public" : ".");
   const runtimePort = Number.isInteger(Number(port)) && Number(port) > 0 ? Number(port) : 8000;
+  const root = /^[A-Za-z0-9_./-]*$/.test(String(docRoot ?? "")) && docRoot && docRoot !== "."
+    ? `/var/www/html/${String(docRoot).replace(/^\.?\/*|\/+$/g, "")}`
+    : "/var/www/html";
 
   return `FROM php:8.3-apache
 
 RUN apt-get update && apt-get install -y --no-install-recommends \\
-      git unzip libicu-dev libonig-dev libxml2-dev libzip-dev \\
-    && docker-php-ext-install -j"$(nproc)" intl mbstring opcache pdo_mysql zip \\
+      git unzip libicu-dev libonig-dev libxml2-dev libzip-dev libpng-dev libpq-dev \\
+    && docker-php-ext-install -j"$(nproc)" intl mbstring opcache pdo_mysql pdo_pgsql mysqli zip gd \\
     && a2enmod rewrite headers \\
     && rm -rf /var/lib/apt/lists/*
 
@@ -17,23 +25,22 @@ WORKDIR /var/www/html
 COPY . .
 
 RUN if [ -f composer.json ]; then \\
-      composer install --no-dev --no-interaction --prefer-dist --optimize-autoloader; \\
-    fi
+      composer install --no-dev --no-interaction --prefer-dist --optimize-autoloader --ignore-platform-reqs \\
+      || composer update --no-dev --no-interaction --prefer-dist --ignore-platform-reqs; \\
+    fi \\
+    && if [ -f artisan ] && [ ! -f .env ] && [ -f .env.example ]; then cp .env.example .env && php artisan key:generate --force || true; fi \\
+    && mkdir -p storage bootstrap/cache \\
+    && chown -R www-data:www-data /var/www/html
 
-RUN mkdir -p public storage bootstrap/cache \\
-    && chown -R www-data:www-data storage bootstrap/cache \\
-    && printf 'Listen ${runtimePort}\\n' >> /etc/apache2/ports.conf \\
-    && cat > /etc/apache2/sites-available/000-default.conf <<'APACHE'
-<VirtualHost *:${runtimePort}>
-    DocumentRoot /var/www/html/public
-    <Directory /var/www/html/public>
-        AllowOverride All
-        Require all granted
-    </Directory>
-    ErrorLog \${APACHE_LOG_DIR}/error.log
-    CustomLog \${APACHE_LOG_DIR}/access.log combined
-</VirtualHost>
-APACHE
+RUN sed -ri 's/^Listen 80$/Listen ${runtimePort}/' /etc/apache2/ports.conf \\
+    && printf '%s\\n' '<VirtualHost *:${runtimePort}>' \\
+      '    DocumentRoot ${root}' \\
+      '    <Directory ${root}>' \\
+      '        AllowOverride All' \\
+      '        Require all granted' \\
+      '        DirectoryIndex index.php index.html' \\
+      '    </Directory>' \\
+      '</VirtualHost>' > /etc/apache2/sites-available/000-default.conf
 
 EXPOSE ${runtimePort}
 

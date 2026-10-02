@@ -22,12 +22,9 @@ function isStaticFrontend(framework) {
 
 export function normalizePlan(plan, metadata = {}) {
   const targetValue = String(plan.deploymentTarget || "").toUpperCase();
-  const fallbackTarget = isStaticFrontend(metadata.framework) && !metadata.dockerized ? "AWS_S3_CLOUDFRONT" : "AWS_ECS_FARGATE";
-  const deploymentTarget = targetValue.includes("S3") || targetValue.includes("CLOUDFRONT")
-    ? "AWS_S3_CLOUDFRONT"
-    : targetValue.includes("ECS") || targetValue.includes("FARGATE")
-      ? "AWS_ECS_FARGATE"
-      : fallbackTarget;
+  const deploymentTarget = targetValue.includes("ECS") || targetValue.includes("FARGATE")
+    ? "AWS_ECS_FARGATE"
+    : "AWS_ECS_FARGATE";
   const cpu = CPU_VALUES.has(plan.cpu) ? plan.cpu : "0.5 vCPU";
   const compatibleMemory = FARGATE_MEMORY_BY_CPU[cpu] || FARGATE_MEMORY_BY_CPU["0.5 vCPU"];
   const memory = MEMORY_VALUES.has(plan.memory) && compatibleMemory.includes(plan.memory)
@@ -50,7 +47,7 @@ export function normalizePlan(plan, metadata = {}) {
  * fallback whenever the optional AI integration is unavailable.
  */
 
-export const AI_MODEL = process.env.GEMINI_MODEL?.trim() || "gemini-3.8-flash";
+export const AI_MODEL = process.env.GEMINI_MODEL?.trim() || "gemini-flash-lite-latest";
 
 export async function generateAiDeploymentPlan(metadata) {
   const {
@@ -90,7 +87,7 @@ Return ONLY valid JSON matching this schema exactly:
 }
 
 Rules:
-1. Choose AWS_S3_CLOUDFRONT for a static frontend without a server runtime; otherwise choose AWS_ECS_FARGATE.
+1. Choose AWS_ECS_FARGATE for all applications and dynamic/static web services.
 2. Use only these CPU values: 0.25 vCPU, 0.5 vCPU, 1 vCPU, 2 vCPU.
 3. Use only these memory values: 512 MB, 1 GB, 2 GB, 4 GB.
 4. healthCheck must be an absolute path containing only letters, numbers, slash, underscore, or hyphen.
@@ -103,8 +100,9 @@ Rules:
     const ai = new GoogleGenAI({ apiKey });
     const candidateModels = [...new Set([
       AI_MODEL,
-      "gemini-3.7-flash",
+      "gemini-flash-lite-latest",
       "gemini-3.5-flash-lite",
+      "gemini-3.1-flash-lite",
       "gemini-flash-latest",
     ])];
 
@@ -153,17 +151,15 @@ export function generateDevOpsFallbackPlan(metadata) {
   const cpu = isJava ? "1 vCPU" : (isFrontend ? "0.25 vCPU" : "0.5 vCPU");
   const memory = isJava ? "2 GB" : (isFrontend ? "512 MB" : "1 GB");
   const healthCheck = "/";
-  const deploymentTarget = useStaticHosting ? "AWS_S3_CLOUDFRONT" : "AWS_ECS_FARGATE";
+  const deploymentTarget = "AWS_ECS_FARGATE";
   const dockerStrategy = dockerized ? "EXISTING" : "GENERATE";
-  const terraformStrategy = useStaticHosting ? "S3_CLOUDFRONT_TEMPLATE" : "FARGATE_TEMPLATE";
+  const terraformStrategy = "FARGATE_TEMPLATE";
 
-  const explanation = useStaticHosting
-    ? `Recommended private S3 origin with CloudFront HTTPS delivery for a static ${framework || "frontend"} application.`
-    : `Recommended AWS ECS Fargate deployment with ${cpu} and ${memory} memory. ${
-      dockerStrategy === "GENERATE"
-        ? "Automated multi-stage container build optimized with caching and non-root execution."
-        : "Using the existing repository Dockerfile."
-    } Target health check probe configured at ${healthCheck} on port ${port}.`;
+  const explanation = `Recommended AWS ECS Fargate deployment with ${cpu} and ${memory} memory. ${
+    dockerStrategy === "GENERATE"
+      ? "Automated multi-stage container build optimized with caching and non-root execution."
+      : "Using the existing repository Dockerfile."
+  } Direct Application Load Balancer routing with health check probe configured at ${healthCheck} on port ${port}.`;
 
   return {
     ...normalizePlan({ deploymentTarget, cpu, memory, healthCheck }, metadata),

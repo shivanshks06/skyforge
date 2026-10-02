@@ -1,41 +1,47 @@
 /**
- * Rust Production Multi-Stage Dockerfile Generator
- * Compiles a release binary and runs in minimal Alpine runtime.
+ * Rust Dockerfile generator. Builds on Debian (glibc) because crates such as openssl-sys fail on
+ * musl, then runs the package's binary next to the source tree for runtime assets.
  */
 export function generateRustDockerfile(metadata = {}) {
-  const {
-    port = 8080,
-    buildCommand = "cargo build --release",
-    startCommand = "",
-  } = metadata;
+  const { port = 8080, binaryName = "" } = metadata;
   const runtimePort = Number.isInteger(Number(port)) && Number(port) > 0 ? Number(port) : 8080;
-  const binaryName = String(startCommand).split(/[\\\\/]/).pop();
-  const runStart = /^[A-Za-z0-9._-]+$/.test(binaryName)
-    ? `/app/bin/${binaryName}`
-    : "find /app/bin -type f -executable | head -n 1 | xargs -I {} {}";
+  const preferred = /^[A-Za-z0-9_-]+$/.test(binaryName) ? binaryName : "";
 
-  return `FROM rust:1.77-alpine AS builder
+  return `FROM rust:1-bookworm AS builder
 
 WORKDIR /app
 
-RUN apk add --no-cache musl-dev
-
-COPY Cargo.toml* Cargo.lock* ./
+RUN apt-get update && apt-get install -y --no-install-recommends pkg-config libssl-dev \\
+    && rm -rf /var/lib/apt/lists/*
 
 COPY . .
 
-RUN ${buildCommand || "cargo build --release"}
+RUN cargo build --release \\
+    && BIN="${preferred ? `target/release/${preferred}` : ""}" \\
+    && if [ -z "$BIN" ] || [ ! -x "$BIN" ]; then \\
+         BIN="$(find target/release -maxdepth 1 -type f -perm -u+x ! -name '*.so' ! -name '*.d' | head -n 1)"; \\
+       fi \\
+    && if [ -z "$BIN" ]; then echo "cargo build produced no executable binary." >&2; exit 1; fi \\
+    && cp "$BIN" /usr/local/bin/app-server
 
-FROM alpine:3.19
+FROM debian:bookworm-slim
+
+RUN apt-get update && apt-get install -y --no-install-recommends ca-certificates libssl3 tzdata \\
+    && rm -rf /var/lib/apt/lists/*
 
 WORKDIR /app
 
-RUN apk add --no-cache ca-certificates tzdata
+COPY --from=builder /app /app
+COPY --from=builder /usr/local/bin/app-server /usr/local/bin/app-server
+RUN rm -rf /app/target
 
-COPY --from=builder /app/target/release/* /app/bin/
+ENV PORT=${runtimePort} \\
+    HOST=0.0.0.0 \\
+    ROCKET_ADDRESS=0.0.0.0 \\
+    ROCKET_PORT=${runtimePort}
 
 EXPOSE ${runtimePort}
 
-CMD ["sh", "-c", "${runStart}"]
+CMD ["app-server"]
 `;
 }

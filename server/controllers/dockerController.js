@@ -28,7 +28,7 @@ export const getDockerConfig = async (req, res) => {
     const hasExistingDocker = Boolean(project.dockerized);
     const currentStrategy = project.dockerStrategy || (hasExistingDocker ? "EXISTING" : "GENERATE");
     const diskFiles = getGeneratedDockerFiles(project.id);
-    let dockerfile = diskFiles?.dockerfile;
+    let dockerfile = currentStrategy === "GENERATE" ? null : diskFiles?.dockerfile;
     if (!dockerfile && currentStrategy === "EXISTING") {
       dockerfile = await getProjectDockerfile(project);
     }
@@ -154,6 +154,7 @@ export const saveDockerFiles = async (req, res) => {
     const updatedProject = await prisma.project.update({
       where: { id: project.id },
       data: {
+        dockerStrategy: "CUSTOM",
         dockerGenerated: true,
         dockerPath: saveResult.dockerPath,
         dockerValidation: validation,
@@ -165,6 +166,7 @@ export const saveDockerFiles = async (req, res) => {
     return res.json({
       message: "Dockerfile and .dockerignore saved successfully",
       project: toPublicProject(updatedProject),
+      strategy: "CUSTOM",
       dockerPath: saveResult.dockerPath,
       validation,
     });

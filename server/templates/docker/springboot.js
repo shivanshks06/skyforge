@@ -1,20 +1,16 @@
+/**
+ * Java Dockerfile generator (Spring Boot, Quarkus, Micronaut, plain Maven/Gradle web apps).
+ * Prefers the repository's wrapper, skips tests, and runs the first runnable jar.
+ */
 export function generateSpringBootDockerfile(metadata = {}) {
-  const { port = 8080, buildTool = "Maven", buildCommand = "" } = metadata;
+  const { port = 8080, buildTool = "Maven", javaVersion = "21" } = metadata;
   const runtimePort = Number.isInteger(Number(port)) && Number(port) > 0 ? Number(port) : 8080;
   const gradle = String(buildTool).toLowerCase().includes("gradle");
-  const builderImage = gradle ? "gradle:8.10.2-jdk21-alpine" : "maven:3.9-eclipse-temurin-21-alpine";
-  const dependencyStep = gradle
-    ? "if [ -x ./gradlew ]; then chmod +x ./gradlew && ./gradlew dependencies --no-daemon || true; else gradle dependencies --no-daemon || true; fi"
-    : "mvn -B dependency:go-offline";
-  const jarSearch = gradle
-    ? "find /app/build/libs -maxdepth 1 -type f -name '*.jar' ! -name '*-plain.jar' | head -n 1"
-    : "find /app/target -maxdepth 1 -type f -name '*.jar' ! -name '*-plain.jar' | head -n 1";
-  const customBuild = buildCommand && !/^\.\/(?:mvnw|gradlew)\b/.test(String(buildCommand))
-    ? String(buildCommand).replace(/"/g, '\\"')
-    : "";
-  const effectivePackageStep = customBuild || (gradle
-    ? "if [ -x ./gradlew ]; then chmod +x ./gradlew && ./gradlew build -x test --no-daemon; else gradle build -x test --no-daemon; fi"
-    : "mvn -B clean package -DskipTests");
+  const builderImage = gradle ? `gradle:8-jdk${javaVersion}` : `maven:3-eclipse-temurin-${javaVersion}`;
+  const packageStep = gradle
+    ? "if [ -f ./gradlew ]; then chmod +x ./gradlew && ./gradlew build -x test --no-daemon; else gradle build -x test --no-daemon; fi"
+    : "if [ -f ./mvnw ]; then chmod +x ./mvnw && ./mvnw -B package -DskipTests; else mvn -B package -DskipTests; fi";
+  const jarSearch = gradle ? "build/libs" : "target";
 
   return `FROM ${builderImage} AS builder
 
@@ -22,15 +18,22 @@ WORKDIR /app
 
 COPY . .
 
-RUN ${dependencyStep}
-RUN ${effectivePackageStep}
-RUN JAR_PATH="$(${jarSearch})" && test -n "$JAR_PATH" && cp "$JAR_PATH" /app/app.jar
+RUN ${packageStep}
+RUN JAR_PATH="$(find /app -path '*/${jarSearch}/*.jar' ! -name '*-plain.jar' ! -name '*-sources.jar' ! -name '*-javadoc.jar' ! -name 'original-*.jar' -printf '%s %p\\n' | sort -rn | head -n 1 | cut -d' ' -f2-)" \\
+    && if [ -z "$JAR_PATH" ]; then echo "The build produced no runnable jar." >&2; exit 1; fi \\
+    && cp "$JAR_PATH" /app/app.jar
 
-FROM eclipse-temurin:21-jre-alpine
+FROM eclipse-temurin:${javaVersion}-jre
 
 WORKDIR /app
 
 COPY --from=builder /app/app.jar ./app.jar
+
+ENV PORT=${runtimePort} \\
+    SERVER_PORT=${runtimePort} \\
+    QUARKUS_HTTP_PORT=${runtimePort} \\
+    MICRONAUT_SERVER_PORT=${runtimePort} \\
+    JAVA_TOOL_OPTIONS="-XX:MaxRAMPercentage=75"
 
 EXPOSE ${runtimePort}
 

@@ -144,6 +144,7 @@ export default function Dashboard() {
         port: projectData.port,
         dockerized: projectData.dockerized,
         requiredEnv: projectData.requiredEnv,
+        envAnalysis: projectData.envAnalysis,
         deploymentTarget: projectData.deploymentTarget,
         confidence: projectData.confidence,
         githubUrl: projectData.githubUrl,

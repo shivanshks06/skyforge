@@ -40,6 +40,11 @@ model Project {
   port             Int?
   dockerized       Boolean      @default(false)
   requiredEnv      String[]
+  envAnalysis      Json?
+  securityTier     String       @default("FREE")
+  securityReport   Json?
+  protection       Json?
+  siteOffline      Boolean      @default(false)
   deploymentTarget String?      @default("AWS ECS Fargate")
   confidence       Int?
   status           String       @default("Imported")

@@ -1,4 +1,4 @@
-import "dotenv/config";
+import "../config/env.js";
 import prisma from "../config/db.js";
 import { encryptObjectValues, encryptSecret, isEncryptedSecret } from "../services/secretService.js";
 

@@ -1,0 +1,24 @@
+# Local-only AWS SSO/profile override.
+# Copy this file to docker-compose.aws-profile.yml, set AWS_PROFILE and
+# AWS_CONFIG_DIR in your shell, then start Compose with both files:
+# docker compose -f docker-compose.yml -f docker-compose.aws-profile.yml up -d
+services:
+  api:
+    environment:
+      AWS_PROFILE: ${AWS_PROFILE:-default}
+      AWS_SDK_LOAD_CONFIG: "1"
+    volumes:
+      - type: bind
+        source: ${AWS_CONFIG_DIR}
+        target: /root/.aws
+        read_only: true
+
+  worker:
+    environment:
+      AWS_PROFILE: ${AWS_PROFILE:-default}
+      AWS_SDK_LOAD_CONFIG: "1"
+    volumes:
+      - type: bind
+        source: ${AWS_CONFIG_DIR}
+        target: /root/.aws
+        read_only: true

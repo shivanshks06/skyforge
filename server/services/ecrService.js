@@ -4,6 +4,10 @@ import {
   CreateRepositoryCommand,
   DescribeRepositoriesCommand,
   DescribeImagesCommand,
+  DescribeImageScanFindingsCommand,
+  PutImageScanningConfigurationCommand,
+  StartImageScanCommand,
+  BatchGetImageCommand,
   GetAuthorizationTokenCommand,
   ListTagsForResourceCommand,
 } from "@aws-sdk/client-ecr";
@@ -130,7 +134,7 @@ export async function pushImageToEcr(deploymentId, project, credentials, localTa
           });
           break;
         } catch (pushErr) {
-          const isTransient = /timeout|EOF|connection reset|broken pipe|retry|temporary|500|502|503|504/i.test(String(pushErr.message || ""));
+          const isTransient = /timeout|EOF|connection reset|broken pipe|retry|temporary|500|502|503|504|closed network|network connection|failed to copy|failed to do request/i.test(String(pushErr.message || ""));
           if (attempt < 3 && isTransient) {
             log(deploymentId, {
               stage: "PUSHING",
@@ -175,4 +179,71 @@ export async function pushImageToEcr(deploymentId, project, credentials, localTa
 
 export function createEcrClient(credentials) {
   return new ECRClient(clientConfig(credentials));
+}
+
+/**
+ * BuildKit pushes an image index (platform image + provenance attestation), which ECR cannot scan.
+ * Resolves the index to the linux/amd64 image manifest that ECS actually runs.
+ */
+async function scannableDigest(ecr, repositoryName, imageDigest) {
+  try {
+    const result = await ecr.send(new BatchGetImageCommand({
+      repositoryName,
+      imageIds: [{ imageDigest }],
+      acceptedMediaTypes: ["application/vnd.oci.image.index.v1+json", "application/vnd.docker.distribution.manifest.list.v2+json", "application/vnd.oci.image.manifest.v1+json", "application/vnd.docker.distribution.manifest.v2+json"],
+    }));
+    const manifest = JSON.parse(result.images?.[0]?.imageManifest || "{}");
+    const platform = (manifest.manifests || []).find((entry) => entry.platform?.os === "linux" && entry.platform?.architecture === "amd64");
+    return platform?.digest || imageDigest;
+  } catch {
+    return imageDigest;
+  }
+}
+
+/**
+ * Container image vulnerability scan results (ECR basic scanning, free). Waits up to `waitMs`
+ * for an in-progress scan. Returns { status, counts, top: [{ name, severity, package }] }.
+ */
+export async function getImageScanFindings({ credentials, repositoryName, imageDigest: pushedDigest, waitMs = 120_000 }) {
+  const ecr = createEcrClient(credentials);
+  const imageDigest = await scannableDigest(ecr, repositoryName, pushedDigest);
+  // Repositories created before scan-on-push was enabled need it switched on for later pushes.
+  await ecr.send(new PutImageScanningConfigurationCommand({ repositoryName, imageScanningConfiguration: { scanOnPush: true } })).catch(() => {});
+  const deadline = Date.now() + waitMs;
+  let started = false;
+  for (;;) {
+    let result;
+    try {
+      result = await ecr.send(new DescribeImageScanFindingsCommand({ repositoryName, imageId: { imageDigest }, maxResults: 50 }));
+    } catch (error) {
+      if (error.name !== "ScanNotFoundException") throw error;
+      // Account-level scanning rules override the repository's scan-on-push flag, so the image
+      // may never have been scanned: start a basic scan explicitly (allowed once per day per image).
+      if (started) return { status: "NOT_SCANNED", imageDigest };
+      started = true;
+      try {
+        await ecr.send(new StartImageScanCommand({ repositoryName, imageId: { imageDigest } }));
+      } catch (startError) {
+        return { status: "NOT_SCANNED", imageDigest, detail: startError.message };
+      }
+      await new Promise((resolve) => setTimeout(resolve, 10_000));
+      continue;
+    }
+    const status = result.imageScanStatus?.status;
+    if (status === "COMPLETE" || status === "ACTIVE") {
+      const findings = result.imageScanFindings?.findings || [];
+      return {
+        status: "COMPLETE",
+        imageDigest,
+        counts: result.imageScanFindings?.findingSeverityCounts || {},
+        top: findings
+          .filter((item) => ["CRITICAL", "HIGH"].includes(item.severity))
+          .slice(0, 10)
+          .map((item) => ({ name: item.name, severity: item.severity, package: item.attributes?.find((attribute) => attribute.key === "package_name")?.value || "" })),
+      };
+    }
+    if (status === "FAILED" || status === "UNSUPPORTED_IMAGE") return { status, imageDigest, detail: result.imageScanStatus?.description };
+    if (Date.now() > deadline) return { status: "IN_PROGRESS", imageDigest };
+    await new Promise((resolve) => setTimeout(resolve, 10_000));
+  }
 }

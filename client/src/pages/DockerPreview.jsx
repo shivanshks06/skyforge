@@ -113,6 +113,7 @@ export default function DockerPreview() {
       setSaving(true);
       const res = await saveProjectDockerFiles(id, dockerfile, dockerignore);
       showNotification("success", "Docker blueprints successfully verified and written to disk!");
+      if (res.strategy) setStrategy(res.strategy);
       if (res.project) {
         setConfig((prev) => ({ ...prev, project: res.project, validation: res.validation }));
       setDirty(false);
@@ -323,6 +324,23 @@ export default function DockerPreview() {
           <span className="text-[#8C7667]">4. Ready to Deploy</span>
         </div>
       </div>
+
+      {strategy === "CUSTOM" && (
+        <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-3 p-4 rounded-2xl bg-[#FAF6F0] border border-[#EADFCF]">
+          <p className="text-xs text-[#5E4C3E]">
+            Deployments build from your saved custom Dockerfile. Reverting regenerates the SkyForge template and discards your edits.
+          </p>
+          <Button
+            variant="outline"
+            size="sm"
+            disabled={switchingStrategy}
+            onClick={() => handleStrategyChange("GENERATE")}
+            className="shrink-0 border-[#EADFCF] bg-white text-[#5E4C3E] hover:bg-[#FAF6F0]"
+          >
+            Revert to SkyForge Template
+          </Button>
+        </div>
+      )}
 
       {/* Step 7: Existing Dockerfile Detection & Strategy Switcher */}
       {hasExistingDocker && (

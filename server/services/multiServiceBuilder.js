@@ -6,19 +6,8 @@ import path from "node:path";
  * Checks if the extracted workspace is a microservices / multi-service application.
  */
 export function isMultiServiceProject(sourceDir) {
-  const servicesDir = path.join(sourceDir, "services");
-  if (fs.existsSync(servicesDir) && fs.statSync(servicesDir).isDirectory()) {
-    try {
-      const entries = fs.readdirSync(servicesDir, { withFileTypes: true });
-      const dirs = entries.filter((e) => e.isDirectory());
-      if (dirs.length >= 2) return true;
-    } catch {}
-  }
-  const composePath = ["docker-compose.yml", "docker-compose.yaml"]
-    .map((f) => path.join(sourceDir, f))
-    .find((f) => fs.existsSync(f));
-  if (composePath) return true;
-  return false;
+  const discovered = detectServices(sourceDir);
+  return discovered.length >= 2;
 }
 
 /**

@@ -15,6 +15,7 @@ const DeploymentPlan = lazy(() => import("./pages/DeploymentPlan"));
 const DockerPreview = lazy(() => import("./pages/DockerPreview"));
 const InfrastructurePreview = lazy(() => import("./pages/InfrastructurePreview"));
 const DeploymentConsole = lazy(() => import("./pages/DeploymentConsole"));
+const Security = lazy(() => import("./pages/Security"));
 const NotFound = lazy(() => import("./pages/NotFound"));
 
 function LoadingScreen() {
@@ -51,6 +52,9 @@ export default function App() {
             </Route>
             <Route path="/project/:id/deploy" element={<ProtectedRoute><DashboardLayout /></ProtectedRoute>}>
               <Route index element={<DeploymentConsole />} />
+            </Route>
+            <Route path="/project/:id/security" element={<ProtectedRoute><DashboardLayout /></ProtectedRoute>}>
+              <Route index element={<Security />} />
             </Route>
             <Route path="*" element={<NotFound />} />
           </Routes>

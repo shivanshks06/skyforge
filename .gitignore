@@ -8,3 +8,4 @@ server/generated/
 .DS_Store
 .vscode/
 .idea/
+docker-compose.aws-profile.yml

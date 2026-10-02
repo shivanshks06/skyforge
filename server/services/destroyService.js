@@ -4,9 +4,9 @@ import { fileURLToPath } from "node:url";
 import prisma from "../config/db.js";
 import { emitDeploymentLog } from "./logsService.js";
 import { getAwsCredentials } from "./awsConnectionService.js";
-import { destroyEcsResources } from "./ecsService.js";
+import { destroyEcsResources, discoverProjectResources } from "./ecsService.js";
 import { destroyStaticResources } from "./staticDeployer.js";
-import { createEcrClient } from "./ecrService.js";
+import { createEcrClient, getRepositoryName } from "./ecrService.js";
 import { DeleteRepositoryCommand, DescribeRepositoriesCommand, ListTagsForResourceCommand } from "@aws-sdk/client-ecr";
 import { STSClient, GetCallerIdentityCommand } from "@aws-sdk/client-sts";
 import { uniqueResources, validateResourceManifests } from "./resourceUtils.js";
@@ -79,6 +79,23 @@ async function deleteEcrRepositories(credentials, deploymentId, recordedNames = 
     await verifyEcrRepositoryDeleted(ecr, repositoryName);
     emitDeploymentLog(deploymentId, { stage: "DESTROY", message: `[ECR] Deleted and verified repository ${repositoryName}.`, level: "success" });
   }
+}
+
+/**
+ * Finds every resource named for this project (recorded or not), deletes what remains, then checks
+ * again. Throws, listing the survivors, unless AWS reports nothing left that belongs to the project.
+ */
+async function sweepAndVerify({ credentials, project, deploymentId }) {
+  const repositoryName = getRepositoryName(project);
+  const before = await discoverProjectResources({ credentials, project, repositoryName });
+  if (before.found.length) {
+    emitDeploymentLog(deploymentId, { stage: "DESTROY", message: `[SWEEP] Removing ${before.found.length} remaining resource(s): ${before.found.join("; ")}`, level: "warn" });
+    await destroyEcsResources({ credentials, resources: before.manifest, deploymentId });
+    if (before.manifest.repositoryName) await deleteEcrRepositories(credentials, deploymentId, [before.manifest.repositoryName]);
+  }
+  const after = await discoverProjectResources({ credentials, project, repositoryName });
+  if (after.found.length) throw new Error(`These AWS resources still exist after teardown: ${after.found.join("; ")}`);
+  emitDeploymentLog(deploymentId, { stage: "DESTROY", message: "[SWEEP] Verified with AWS: no resources for this project remain, so it no longer incurs charges.", level: "success" });
 }
 
 function supersededError(message = "This teardown operation was superseded by a newer project operation.") {
@@ -169,7 +186,9 @@ export async function destroyProjectInfrastructure({ projectId, deploymentId, us
     if (claim.count !== 1) throw supersededError();
     emitDeploymentLog(operation.id, { stage: "DESTROY", message: `[DESTROY] Starting verified teardown for ${project.name}.`, level: "warn" });
 
-    const credentials = resources.length ? await credentialsFor(userId) : null;
+    // Credentials are needed even with no recorded resources: the sweep below looks for
+    // anything a crashed or interrupted operation created without recording it.
+    const credentials = await credentialsFor(userId);
     if (resources.length && !credentials) throw new Error("AWS credentials are required to destroy existing cloud resources.");
     if (resources.length) await assertManifestAccount(credentials, resources);
 
@@ -187,6 +206,8 @@ export async function destroyProjectInfrastructure({ projectId, deploymentId, us
     for (const entry of ecrDeletes) {
       await deleteEcrRepositories(entry.credentials, operation.id, entry.repositoryNames);
     }
+    if (credentials) await sweepAndVerify({ credentials, project, deploymentId: operation.id });
+    else emitDeploymentLog(operation.id, { stage: "DESTROY", message: "[SWEEP] No AWS connection; the leftover-resource sweep was skipped.", level: "warn" });
 
     const projectDir = path.resolve(GENERATED_DIR, projectId);
     if (projectDir.startsWith(`${GENERATED_DIR}${path.sep}`) && fs.existsSync(projectDir)) {
@@ -214,6 +235,11 @@ export async function destroyProjectInfrastructure({ projectId, deploymentId, us
       },
     });
     await markProjectDestroyedIfCurrent(projectId, operation.id);
+    // Security state referred to the deleted resources; keep only the scanner token.
+    await prisma.project.update({
+      where: { id: projectId },
+      data: { siteOffline: false, protection: project.protection?.scanToken ? { scanToken: project.protection.scanToken } : null },
+    }).catch(() => {});
     emitDeploymentLog(operation.id, { stage: "DESTROY_COMPLETE", message: "[DESTROY] All snapshotted project resources were removed and verified.", level: "success" });
     return { success: true, status: "DESTROYED", deploymentId: operation.id };
   } catch (error) {

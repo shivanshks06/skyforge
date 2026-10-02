@@ -52,7 +52,8 @@ export const getProjectById = async (id) => (await api.get(`/projects/${id}`)).d
 
 export const getProjectPlan = async (id) => (await api.get(`/projects/${id}/plan`)).data;
 export const generateProjectPlan = async (id) => (await api.post(`/projects/${id}/plan`)).data;
-export const saveProjectEnvVars = async (id, envValues) => (await api.post(`/projects/${id}/env`, { envValues })).data;
+export const saveProjectEnvVars = async (id, envValues, ignoredEnv) => (await api.post(`/projects/${id}/env`, { envValues, ...(ignoredEnv ? { ignoredEnv } : {}) })).data;
+export const scanProjectEnv = async (id) => (await api.post(`/projects/${id}/env/scan`)).data;
 
 export const getProjectDockerConfig = async (id) => (await api.get(`/projects/${id}/docker`)).data;
 export const updateProjectDockerStrategy = async (id, strategy) => (await api.post(`/projects/${id}/docker/strategy`, { strategy })).data;
@@ -61,7 +62,6 @@ export const saveProjectDockerFiles = async (id, dockerfile, dockerignore) => (a
 
 export const deleteProject = async (id) => (await api.delete(`/projects/${id}`)).data;
 export const getProjectInfrastructure = async (id) => (await api.get(`/projects/${id}/infrastructure`)).data;
-export const updateProjectInfrastructureTarget = async (id, target) => (await api.post(`/projects/${id}/infrastructure/target`, { target })).data;
 
 export const getAwsStatus = async () => (await api.get("/aws/status")).data;
 export const initiateAwsSetup = async (region) => (await api.post("/aws/setup", { region })).data;
@@ -114,3 +114,12 @@ export async function streamDeploymentLogs(deploymentId, { onMessage, onError, s
 }
 
 export default api;
+
+export const getProjectSecurity = async (id) => (await api.get(`/projects/${id}/security`)).data;
+export const setProjectSecurityTier = async (id, tier) => (await api.post(`/projects/${id}/security/tier`, { tier })).data;
+export const runProjectSecurityScan = async (id) => (await api.post(`/projects/${id}/security/scan`, undefined, { timeout: 240_000 })).data;
+export const setUnderAttackMode = async (id, enabled) => (await api.post(`/projects/${id}/security/under-attack`, { enabled })).data;
+export const unbanProjectIp = async (id, ip) => (await api.post(`/projects/${id}/security/unban`, { ip })).data;
+export const createSecurityFixPullRequest = async (id, findingId) => (await api.post(`/projects/${id}/security/fix`, { findingId }, { timeout: 180_000 })).data;
+export const takeSiteOffline = async (id) => (await api.post(`/projects/${id}/site/offline`)).data;
+export const bringSiteOnline = async (id) => (await api.post(`/projects/${id}/site/online`)).data;

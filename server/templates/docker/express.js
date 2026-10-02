@@ -1,42 +1,38 @@
+import { NODE_INSTALL_STEP, shellQuoteForCmd, nodeImage } from "./nodeInstall.js";
+
 /**
- * Express / Node.js / TypeScript Backend Dockerfile Generator
- * Lean production image with dependency fallbacks and TypeScript build support.
+ * Node.js server Dockerfile generator (Express, Fastify, Koa, NestJS, Nuxt, SvelteKit, plain Node).
+ * Installs with lockfile fallbacks, runs the build script when present, and starts the
+ * detected entry point with PORT/HOST set so the app listens where the load balancer expects.
  */
 export function generateExpressDockerfile(metadata = {}) {
   const {
     buildCommand,
     startCommand = "npm start",
-    port = 5000,
+    port = 3000,
+    nodeVersion = "22",
   } = metadata;
-
+  const runtimePort = Number.isInteger(Number(port)) && Number(port) > 0 ? Number(port) : 3000;
   const buildStep = buildCommand
-    ? `\nRUN ${buildCommand}\n`
+    ? `\nRUN ${buildCommand} || NODE_OPTIONS=--openssl-legacy-provider ${buildCommand}\n`
     : "";
 
-  return `FROM node:22-alpine
+  return `FROM ${nodeImage(nodeVersion)}
 
 WORKDIR /app
 
-COPY package*.json yarn.lock* pnpm-lock.yaml* bun.lock* tsconfig*.json* ./
-
-RUN if [ -f bun.lock ] || [ -f bun.lockb ]; then \\
-      npm install --global bun@1 && bun install --frozen-lockfile; \\
-    else \\
-      corepack enable && if [ -f package-lock.json ]; then \\
-        npm ci --no-audit --no-fund; \\
-      elif [ -f yarn.lock ]; then \\
-        yarn install --frozen-lockfile; \\
-      elif [ -f pnpm-lock.yaml ]; then \\
-        pnpm install --frozen-lockfile; \\
-      else \\
-        npm install --no-audit --no-fund; \\
-      fi; \\
-    fi
+ENV PORT=${runtimePort} \\
+    HOST=0.0.0.0 \\
+    HOSTNAME=0.0.0.0
 
 COPY . .
-${buildStep}
-EXPOSE ${port || 5000}
 
-CMD ["sh", "-c", "${(startCommand || "npm start").replace(/"/g, '\\"')}"]
+${NODE_INSTALL_STEP}
+${buildStep}
+ENV NODE_ENV=production
+
+EXPOSE ${runtimePort}
+
+CMD ["sh", "-c", "${shellQuoteForCmd(startCommand || "npm start")}"]
 `;
 }

@@ -6,6 +6,7 @@ import { Prisma } from "@prisma/client";
 import { getOwnedProject } from "../services/ownershipService.js";
 import { maskObjectValues } from "../services/secretService.js";
 import { toPublicProject } from "../services/projectSerializer.js";
+import { sanitizeEnvAnalysis } from "../services/envScanner.js";
 
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
@@ -26,6 +27,7 @@ const publicProjectFields = {
   port: true,
   dockerized: true,
   requiredEnv: true,
+  envAnalysis: true,
   deploymentTarget: true,
   confidence: true,
   status: true,
@@ -72,13 +74,10 @@ function normalizeRepository(repoName, githubUrl) {
 
 function normalizeDeploymentTarget(value) {
   const normalized = String(value || "AWS ECS Fargate").trim().toLowerCase();
-  if (["aws s3 cloudfront", "aws_s3_cloudfront", "s3 cloudfront", "s3_cloudfront", "static", "s3"].includes(normalized)) {
-    return "AWS S3 CloudFront";
-  }
   if (["aws ecs fargate", "aws_ecs_fargate", "ecs fargate", "ecs_fargate", "fargate", "ecs"].includes(normalized)) {
     return "AWS ECS Fargate";
   }
-  throw new Error("Deployment target must be AWS ECS Fargate or AWS S3 CloudFront.");
+  return "AWS ECS Fargate";
 }
 
 function parsePort(value) {
@@ -138,6 +137,7 @@ export const createProject = async (req, res) => {
       port,
       dockerized = false,
       requiredEnv = [],
+      envAnalysis,
       deploymentTarget = "AWS ECS Fargate",
       confidence,
       githubUrl,
@@ -186,6 +186,7 @@ export const createProject = async (req, res) => {
         port: parsePort(port),
         dockerized: dockerized === true,
         requiredEnv: normalizeRequiredEnv(requiredEnv),
+        ...(sanitizeEnvAnalysis(envAnalysis) ? { envAnalysis: sanitizeEnvAnalysis(envAnalysis) } : {}),
         deploymentTarget: deploymentTargetValue,
         confidence: parseConfidence(confidence),
         githubUrl: repository.githubUrl,

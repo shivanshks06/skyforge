@@ -61,12 +61,13 @@ async function assertDeployableEndpoint(value) {
   const url = new URL(value);
   if (!["http:", "https:"].includes(url.protocol)) throw new Error("Deployment endpoint must use HTTP or HTTPS.");
   if (url.username || url.password) throw new Error("Deployment endpoint credentials are not allowed.");
-  if (process.env.NODE_ENV === "production" && url.protocol !== "https:") {
-    throw new Error("Production deployment endpoints must use HTTPS.");
-  }
   const hostname = normalizedHostname(url.hostname);
   const isLocal = hostname === "localhost" || hostname === "127.0.0.1" || hostname === "::1";
   const isAwsHost = hostname.endsWith(".amazonaws.com") || hostname.endsWith(".cloudfront.net");
+  const isAwsAlb = hostname.endsWith(".elb.amazonaws.com") || hostname.endsWith(".elb.amazonaws.com.cn");
+  if (process.env.NODE_ENV === "production" && url.protocol !== "https:" && !isAwsAlb && process.env.ALLOW_HTTP_DEPLOYMENT_HEALTHCHECK !== "true") {
+    throw new Error("Production deployment endpoints must use HTTPS or AWS ALB.");
+  }
   if (process.env.NODE_ENV === "production" && isLocal) {
     throw new Error("Local deployment endpoints are not allowed in production.");
   }
@@ -126,7 +127,8 @@ export async function probeEndpoint(endpoint, options = {}) {
             maxRedirects: 0,
             proxy: false,
             responseType: "stream",
-            validateStatus: (status) => status >= 200 && status < 400,
+            // Any non-5xx answer means the app is up: APIs often 404 on "/" and dashboards 401/302.
+            validateStatus: (status) => status >= 200 && status < 500,
             headers: { "User-Agent": "SkyForge-HealthProbe/1.0" },
             ...(currentUrl.protocol === "https:" ? { httpsAgent: agent } : { httpAgent: agent }),
           });
@@ -141,7 +143,10 @@ export async function probeEndpoint(endpoint, options = {}) {
         agent?.destroy();
         if (response.status < 300 || response.status >= 400 || !response.headers.location) break;
         if (redirectCount === maxRedirects) throw new Error(`Endpoint exceeded ${maxRedirects} redirects.`);
-        currentUrl = await assertDeployableEndpoint(new URL(response.headers.location, currentUrl).toString());
+        const nextUrl = new URL(response.headers.location, currentUrl);
+        // A redirect elsewhere (HTTPS upgrade, external login) already proves the app answered.
+        if (nextUrl.hostname !== currentUrl.hostname) break;
+        currentUrl = await assertDeployableEndpoint(nextUrl.toString());
       }
       return {
         healthy: true,
@@ -157,4 +162,26 @@ export async function probeEndpoint(endpoint, options = {}) {
   }
 
   throw new Error(`Health check failed for ${baseUrl.hostname}: ${lastError?.message || "unknown error"}`);
+}
+
+/**
+ * A new load balancer's hostname takes a few minutes to appear in DNS, and some resolvers cache
+ * the "not found" answer meanwhile. Waits until the endpoint resolves (or the timeout passes).
+ */
+export async function waitForDnsResolution(endpoint, { timeoutMs = 6 * 60_000, onWait } = {}) {
+  const { hostname } = new URL(endpoint);
+  const deadline = Date.now() + timeoutMs;
+  let notified = false;
+  while (Date.now() < deadline) {
+    try {
+      await dns.lookup(hostname);
+      return true;
+    } catch (error) {
+      if (!["ENOTFOUND", "EAI_AGAIN", "ESERVFAIL"].includes(error.code)) throw error;
+      if (!notified) onWait?.();
+      notified = true;
+      await new Promise((resolve) => setTimeout(resolve, 10_000));
+    }
+  }
+  return false;
 }

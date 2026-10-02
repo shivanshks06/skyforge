@@ -14,12 +14,16 @@ import connection from "../redis/connection.js";
 import prisma from "../config/db.js";
 import { emitDeploymentLog, getDeploymentLogs, persistDeploymentLogs } from "../services/logsService.js";
 import { getAwsCredentials } from "../services/awsConnectionService.js";
-import { prepareRepository, buildStaticAssets, buildContainerImage } from "../services/sourceService.js";
+import { prepareRepository, buildContainerImage } from "../services/sourceService.js";
 import { pushImageToEcr } from "../services/ecrService.js";
-import { deployToEcs, rollbackEcs } from "../services/ecsService.js";
-import { deployStaticProject, rollbackStaticDistribution } from "../services/staticDeployer.js";
-import { probeEndpoint } from "../services/healthService.js";
+import { deployToEcs, rollbackEcs, loadBalancerTargetsHealthy } from "../services/ecsService.js";
+import { probeEndpoint, waitForDnsResolution } from "../services/healthService.js";
 import { addMonitorJob } from "../queues/monitorQueue.js";
+import { scanDirectory, localhostWarnings } from "../services/envScanner.js";
+import { findAppRoot } from "../services/buildPlanner.js";
+import { collectSourceFiles } from "../services/envScanner.js";
+import { prepareCanary, applyProtection, buildSecurityReport } from "../services/securityService.js";
+import { decryptObjectValues } from "../services/secretService.js";
 
 const RUNNABLE_DEPLOYMENT_STATUSES = ["QUEUED", "BUILDING", "PUSHING", "PROVISIONING", "DEPLOYING", "HEALTH_CHECK"];
 const ACTIVE_DEPLOYMENT_STATUSES = ["QUEUED", "BUILDING", "PUSHING", "PROVISIONING", "DEPLOYING", "HEALTH_CHECK", "ROLLING_BACK", "DESTROYING", "DESTROY_FAILED"];
@@ -40,26 +44,6 @@ async function updateProjectStatusForDeployment({ deploymentId, projectId, worke
   }, { timeout: 15_000 });
 }
 
-function runtimeProjectFor(project, target) {
-  const framework = String(project.framework || "").toLowerCase();
-  if (target === "AWS_ECS_FARGATE") {
-    if (!project.dockerized && (framework.includes("react") || framework.includes("vite") || framework.includes("vue") || framework.includes("svelte"))) {
-      return { ...project, port: 80 };
-    }
-    if (project.name === "ecommerce-k8s" || framework.includes("generic")) {
-      return { ...project, port: 80 };
-    }
-  }
-  return project;
-}
-
-function targetFor(project, requestedTarget) {
-  const value = String(requestedTarget || project.deploymentTarget || "").toUpperCase();
-  return value.includes("S3") || value.includes("CLOUDFRONT") || value === "STATIC"
-    ? "AWS_S3_CLOUDFRONT"
-    : "AWS_ECS_FARGATE";
-}
-
 async function credentialsFor(userId) {
   const connectionRecord = await prisma.awsConnection.findUnique({ where: { userId } });
   if (connectionRecord) {
@@ -76,6 +60,68 @@ async function credentialsFor(userId) {
     };
   }
   throw new Error("No AWS connection is configured for this user.");
+}
+
+// Re-scans the source actually being deployed and stops before the (slow) build when a required
+// variable is missing, instead of letting the container crash-loop on AWS.
+async function verifyEnvironment(project, sourceDir, deploymentId) {
+  let scan;
+  try {
+    scan = scanDirectory(findAppRoot(sourceDir));
+  } catch (error) {
+    emitDeploymentLog(deploymentId, { stage: "CLONING", message: `[ENV] Environment scan skipped: ${error.message}`, level: "warn" });
+    return;
+  }
+  const ignored = (project.envAnalysis?.ignored || []).filter((name) => scan.variables.some((variable) => variable.name === name));
+  const requiredEnv = scan.variables.filter((variable) => variable.required).map((variable) => variable.name);
+  await prisma.project.update({ where: { id: project.id }, data: { envAnalysis: { ...scan, ignored }, requiredEnv } }).catch(() => {});
+
+  const configured = decryptObjectValues(project.envConfig || {});
+  const log = (message, level = "info") => emitDeploymentLog(deploymentId, { stage: "CLONING", message, level });
+  for (const service of scan.services) {
+    if (service.id === "sqlite") log("[ENV] This app uses SQLite: data is stored inside the container and is reset on every deployment.", "warn");
+    else log(`[ENV] This app uses ${service.label} (${service.evidence.join(", ")}); it needs a hosted instance reachable from AWS${service.envVars.length ? ` via ${service.envVars.join(", ")}` : service.envHint ? `, usually configured as ${service.envHint}` : ""}.`, "warn");
+  }
+  for (const name of localhostWarnings(configured)) log(`[ENV] ${name} points to localhost, which is the container itself on AWS; the app will not reach that service.`, "warn");
+
+  const missing = scan.variables.filter((variable) => variable.required && !ignored.includes(variable.name)
+    && String(configured[variable.name] ?? "").trim() === "");
+  if (!missing.length) {
+    if (requiredEnv.length) log(`[ENV] All ${requiredEnv.length} required environment variable(s) are configured.`, "success");
+    return;
+  }
+  for (const variable of missing) log(`[ENV] Missing required variable ${variable.name} (used in ${variable.locations.join(", ")}).`, "error");
+  const error = new Error(`Missing required environment variables: ${missing.map((variable) => variable.name).join(", ")}. Set them on the Environment page (or mark them as not needed) and deploy again.`);
+  error.code = "MISSING_ENVIRONMENT";
+  throw error;
+}
+
+/**
+ * Post-launch security work. Never fails the deployment: the site is already live, so problems
+ * are logged as warnings.
+ */
+async function secureLiveDeployment({ project, credentials, deploymentId, resources, liveUrl, imageDigest, sourceDir }) {
+  const log = (message, level = "info") => emitDeploymentLog(deploymentId, { stage: "LIVE", message, level });
+  await prisma.project.update({ where: { id: project.id }, data: { siteOffline: false } }).catch(() => {});
+  let sourceFiles = [];
+  try {
+    sourceFiles = collectSourceFiles(findAppRoot(sourceDir));
+  } catch {}
+  try {
+    const fresh = await prisma.project.findUnique({ where: { id: project.id } });
+    const firewall = await applyProtection({ project: fresh, credentials, resources, sourceFiles, log });
+    const merged = { ...(resources || {}), ...Object.fromEntries(Object.entries(firewall).filter(([, value]) => value)) };
+    for (const key of Object.keys(firewall)) if (!firewall[key]) delete merged[key];
+    await prisma.deployment.update({ where: { id: deploymentId }, data: { resources: merged } });
+  } catch (error) {
+    log(`[SECURITY] Firewall could not be applied: ${error.name || "error"}: ${String(error.message).slice(0, 160)}`, "warn");
+  }
+  try {
+    const fresh = await prisma.project.findUnique({ where: { id: project.id } });
+    await buildSecurityReport({ project: fresh, credentials, liveUrl, imageDigest, sourceFiles, log });
+  } catch (error) {
+    log(`[SECURITY] Security scan could not complete: ${String(error.message).slice(0, 160)}`, "warn");
+  }
 }
 
 function staleWorkerError() {
@@ -107,14 +153,12 @@ async function assertNotCancelled(deploymentId, workerJobId) {
 }
 
 export async function processDeploymentJob(job) {
-  const { deploymentId, projectId, userId, target: requestedTarget, resumeStep } = job.data;
+  const { deploymentId, projectId, userId, resumeStep } = job.data;
   const workerJobId = String(job.id || "");
   let activeStep = resumeStep || "CLONING";
   let resources = null;
-  let artifactPath = null;
   let deploymentCredentials = null;
   let previousDeployment = null;
-  let attemptedTarget = null;
 
   try {
     if (!workerJobId) throw staleWorkerError();
@@ -145,9 +189,7 @@ export async function processDeploymentJob(job) {
       error.code = "DEPLOYMENT_CONFIG_CHANGED";
       throw error;
     }
-    const target = targetFor(project, requestedTarget);
-    attemptedTarget = target;
-    const runtimeProject = runtimeProjectFor(project, target);
+    const target = "AWS_ECS_FARGATE";
     const credentials = await credentialsFor(project.userId);
     deploymentCredentials = credentials;
     const previous = await prisma.deployment.findFirst({
@@ -183,71 +225,70 @@ export async function processDeploymentJob(job) {
 
     const sourceDir = await prepareRepository(project, deploymentId);
     await assertNotCancelled(deploymentId, workerJobId);
+    await verifyEnvironment(project, sourceDir, deploymentId);
     activeStep = "BUILDING";
     await updateStage(deploymentId, workerJobId, { status: "BUILDING", stage: "BUILDING", currentStep: "BUILDING" });
 
-    let deployResult;
-    if (target === "AWS_S3_CLOUDFRONT") {
-      emitDeploymentLog(deploymentId, { stage: "PUSHING", message: "[PUSH] Static target does not require a container registry.", level: "info" });
-      const outputDir = await buildStaticAssets(project, deploymentId, sourceDir);
-      await assertNotCancelled(deploymentId, workerJobId);
-      artifactPath = outputDir;
-      await updateStage(deploymentId, workerJobId, { artifactPath, stage: "PROVISIONING", currentStep: "PROVISIONING", status: "PROVISIONING" });
-      emitDeploymentLog(deploymentId, { stage: "PROVISIONING", message: "[CLOUDFRONT] Preparing private S3 origin and Origin Access Control.", level: "info" });
-      await updateStage(deploymentId, workerJobId, { stage: "DEPLOYING", currentStep: "DEPLOYING", status: "DEPLOYING" });
-      deployResult = await deployStaticProject({
-        deploymentId,
-        project,
-        credentials,
-        outputDir,
-        onResources: persistResources,
-      });
-      await assertNotCancelled(deploymentId, workerJobId);
-    } else {
-      const imageTag = `skyforge-${String(project.id).toLowerCase().replace(/[^a-z0-9-]/g, "-")}-${String(deploymentId).slice(-8)}`;
-      await buildContainerImage(runtimeProject, deploymentId, sourceDir, imageTag);
-      await assertNotCancelled(deploymentId, workerJobId);
-      activeStep = "PUSHING";
-      await updateStage(deploymentId, workerJobId, { status: "PUSHING", stage: "PUSHING", currentStep: "PUSHING" });
-      const pushed = await pushImageToEcr(deploymentId, project, credentials, imageTag, persistResources);
-      resources = {
-        ...(resources || {}),
-        type: "ECS_FARGATE",
-        repositoryName: pushed.repositoryName,
-        registry: pushed.registry,
-        imageUri: pushed.ecrUri,
-        imageDigest: pushed.imageDigest,
-      };
-      await updateStage(deploymentId, workerJobId, { resources });
-      await assertNotCancelled(deploymentId, workerJobId);
-      await updateStage(deploymentId, workerJobId, { status: "PROVISIONING", stage: "PROVISIONING", currentStep: "PROVISIONING" });
-      emitDeploymentLog(deploymentId, { stage: "PROVISIONING", message: "[ECS] Provisioning task definition, service, load balancer, and target group.", level: "info" });
-      await updateStage(deploymentId, workerJobId, { status: "DEPLOYING", stage: "DEPLOYING", currentStep: "DEPLOYING" });
-      deployResult = await deployToEcs({
-        deploymentId,
-        project: runtimeProject,
-        credentials,
-        imageUri: pushed.ecrUri,
-        onResources: persistResources,
-      });
-      await assertNotCancelled(deploymentId, workerJobId);
-    }
+    const imageTag = `skyforge-${String(project.id).toLowerCase().replace(/[^a-z0-9-]/g, "-")}-${String(deploymentId).slice(-8)}`;
+    const built = await buildContainerImage(project, deploymentId, sourceDir, imageTag);
+    // The build plan decides the listening port from the source (e.g. 80 for nginx-served SPAs).
+    const runtimeProject = { ...project, port: built.port || project.port };
+    await assertNotCancelled(deploymentId, workerJobId);
+    activeStep = "PUSHING";
+    await updateStage(deploymentId, workerJobId, { status: "PUSHING", stage: "PUSHING", currentStep: "PUSHING" });
+    const pushed = await pushImageToEcr(deploymentId, project, credentials, imageTag, persistResources);
+    resources = {
+      ...(resources || {}),
+      type: "ECS_FARGATE",
+      repositoryName: pushed.repositoryName,
+      registry: pushed.registry,
+      imageUri: pushed.ecrUri,
+      imageDigest: pushed.imageDigest,
+    };
+    await updateStage(deploymentId, workerJobId, { resources });
+    await assertNotCancelled(deploymentId, workerJobId);
+    activeStep = "PROVISIONING";
+    await updateStage(deploymentId, workerJobId, { status: "PROVISIONING", stage: "PROVISIONING", currentStep: "PROVISIONING" });
+    emitDeploymentLog(deploymentId, { stage: "PROVISIONING", message: "[ECS] Provisioning task definition, service, load balancer, and target group.", level: "info" });
+    activeStep = "DEPLOYING";
+    await updateStage(deploymentId, workerJobId, { status: "DEPLOYING", stage: "DEPLOYING", currentStep: "DEPLOYING" });
+    const securityLog = (message, level = "info") => emitDeploymentLog(deploymentId, { stage: "DEPLOYING", message, level });
+    const canary = await prepareCanary({ project, credentials, log: securityLog });
+    if (canary.canary) await persistResources({ canaryUserName: canary.canary.userName });
+    const deployResult = await deployToEcs({
+      deploymentId,
+      project: runtimeProject,
+      credentials,
+      imageUri: pushed.ecrUri,
+      onResources: persistResources,
+      extraEnvironment: canary.env,
+    });
+    await assertNotCancelled(deploymentId, workerJobId);
 
     if (deployResult.resources && typeof deployResult.resources === "object") {
       resources = { ...(resources || {}), ...deployResult.resources };
     } else if (previous?.resources && !resources) {
       resources = previous.resources;
     }
-    await updateStage(deploymentId, workerJobId, { resources, artifactPath });
+    await updateStage(deploymentId, workerJobId, { resources });
 
     activeStep = "HEALTH_CHECK";
     await updateStage(deploymentId, workerJobId, { status: "HEALTH_CHECK", stage: "HEALTH_CHECK", currentStep: "HEALTH_CHECK" });
     const healthPath = typeof project.healthCheck === "string" && /^\/[A-Za-z0-9/_-]*$/.test(project.healthCheck) ? project.healthCheck : "/";
-    const health = await probeEndpoint(deployResult.endpoint, {
-      attempts: 8,
-      timeoutMs: 10_000,
-      ...(target === "AWS_ECS_FARGATE" ? { path: healthPath } : {}),
+    await waitForDnsResolution(deployResult.endpoint, {
+      onWait: () => emitDeploymentLog(deploymentId, { stage: "HEALTH_CHECK", message: "[HEALTH] Waiting for the new load balancer address to appear in DNS (usually 1-5 minutes)...", level: "info" }),
     });
+    let health;
+    try {
+      health = await probeEndpoint(deployResult.endpoint, { attempts: 20, timeoutMs: 10_000, path: healthPath });
+    } catch (probeError) {
+      // This machine's network or DNS can lag behind AWS; the load balancer's own health check
+      // is authoritative for whether the app is serving.
+      const awsHealthy = await loadBalancerTargetsHealthy({ credentials, targetGroupArn: resources?.targetGroupArn }).catch(() => false);
+      if (!awsHealthy) throw probeError;
+      emitDeploymentLog(deploymentId, { stage: "HEALTH_CHECK", message: `[HEALTH] This machine could not reach the endpoint yet (${probeError.message.slice(0, 120)}), but AWS reports the load balancer target healthy.`, level: "warn" });
+      health = { endpoint: deployResult.endpoint, status: "healthy (AWS target health)", latencyMs: null };
+    }
     emitDeploymentLog(deploymentId, { stage: "HEALTH_CHECK", message: `[HEALTH] ${health.endpoint} returned HTTP ${health.status} in ${health.latencyMs}ms.`, level: "success" });
 
     activeStep = "LIVE";
@@ -260,7 +301,6 @@ export async function processDeploymentJob(job) {
       latencyMs: health.latencyMs,
       target: deployResult.type,
       resources,
-      artifactPath,
       completedAt: new Date(),
       error: null,
     });
@@ -271,6 +311,7 @@ export async function processDeploymentJob(job) {
       console.error(`[WORKER] Deployment ${deploymentId} is live but project status update failed:`, projectError.message);
     }
     emitDeploymentLog(deploymentId, { stage: "LIVE", message: `[LIVE] Application is live at ${deployResult.endpoint}`, level: "success" });
+    await secureLiveDeployment({ project, credentials, deploymentId, resources, liveUrl: deployResult.endpoint, imageDigest: pushed.imageDigest, sourceDir });
     try {
       await persistDeploymentLogs(deploymentId, getDeploymentLogs(deploymentId));
     } catch (logsError) {
@@ -292,8 +333,7 @@ export async function processDeploymentJob(job) {
       throw error;
     }
     if (
-      attemptedTarget === "AWS_ECS_FARGATE"
-      && deploymentCredentials
+      deploymentCredentials
       && resources?.clusterName
       && resources?.serviceName
       && resources?.taskDefinitionArn
@@ -313,21 +353,6 @@ export async function processDeploymentJob(job) {
         emitDeploymentLog(deploymentId, { stage: "FAILED", message: `[RECOVERY] Previous ECS revision could not be restored: ${recoveryError.message}`, level: "error" });
       }
     }
-    if (
-      attemptedTarget === "AWS_S3_CLOUDFRONT"
-      && deploymentCredentials
-      && resources?.distributionId
-      && previousDeployment?.resources?.type === "S3_CLOUDFRONT"
-      && previousDeployment.resources.distributionId === resources.distributionId
-    ) {
-      try {
-        await rollbackStaticDistribution({ credentials: deploymentCredentials, resources, previousResources: previousDeployment.resources });
-        emitDeploymentLog(deploymentId, { stage: "FAILED", message: "[RECOVERY] Restored the previously live static release after the failed rollout.", level: "warn" });
-      } catch (recoveryError) {
-        console.error(`[WORKER] Static compensation failed for ${deploymentId}:`, recoveryError);
-        emitDeploymentLog(deploymentId, { stage: "FAILED", message: `[RECOVERY] Previous static release could not be restored: ${recoveryError.message}`, level: "error" });
-      }
-    }
     console.error(`[WORKER] Deployment ${deploymentId} failed at ${activeStep}:`, error);
     await updateProjectStatusForDeployment({
       deploymentId,
@@ -343,7 +368,6 @@ export async function processDeploymentJob(job) {
       currentStep: activeStep,
       error: String(error.message).slice(0, 2000),
       resources,
-      artifactPath,
       completedAt: new Date(),
     }).catch(() => {});
     throw error;

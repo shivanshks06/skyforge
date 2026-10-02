@@ -13,6 +13,8 @@ import { generatePhpDockerfile } from "../templates/docker/php.js";
 import { generateRustDockerfile } from "../templates/docker/rust.js";
 import { generateSpringBootDockerfile } from "../templates/docker/springboot.js";
 import { generateStaticDockerfile } from "../templates/docker/static.js";
+import { generateRubyDockerfile, generateJekyllDockerfile } from "../templates/docker/ruby.js";
+import { generateDotnetDockerfile } from "../templates/docker/dotnet.js";
 import { generateDockerignore } from "../templates/docker/dockerignore.js";
 
 const __filename = fileURLToPath(import.meta.url);
@@ -51,6 +53,14 @@ export function generateDockerfile(project = {}, plan = {}) {
     startCommand: safeCommand(project.startCommand),
     port: project.port ?? 3000,
   };
+  // Optional hints resolved by the build planner from the checked-out source.
+  for (const key of ["nodeVersion", "pythonVersion", "javaVersion", "rubyVersion", "dotnetVersion", "staticRoot", "docRoot", "binaryName", "projectFile", "fallbackBuildCommand"]) {
+    if (project[key] !== undefined && project[key] !== null && project[key] !== "") metadata[key] = String(project[key]);
+  }
+
+  // Kinds chosen by the build planner: static-output SPAs and Node-served meta-frameworks.
+  if (frameworkKey.includes("(spa)") || frameworkKey === "frontend spa") return generateReactViteDockerfile(metadata);
+  if (frameworkKey.includes("(node)")) return generateExpressDockerfile(metadata);
 
   // Next.js must be checked before generic React metadata.
   if (frameworkKey.includes("next")) {
@@ -58,9 +68,14 @@ export function generateDockerfile(project = {}, plan = {}) {
   }
 
   // React, Vite, Vue, Svelte SPAs
-  if (frameworkKey.includes("react") || frameworkKey.includes("vite") || frameworkKey.includes("vue") || frameworkKey.includes("svelte")) {
+  if (!frameworkKey.includes("sveltekit") && ["react", "vite", "vue", "svelte", "angular", "preact", "astro", "spa"].some((name) => frameworkKey.includes(name))) {
     return generateReactViteDockerfile(metadata);
   }
+
+  // Ruby (Jekyll sites, Rails, Sinatra, Rack) and .NET
+  if (frameworkKey.includes("jekyll")) return generateJekyllDockerfile(metadata);
+  if (languageKey === "ruby" || frameworkKey.includes("rails") || frameworkKey.includes("sinatra")) return generateRubyDockerfile(metadata);
+  if (languageKey === "c#" || languageKey === ".net" || frameworkKey.includes("asp.net") || frameworkKey.includes(".net")) return generateDotnetDockerfile(metadata);
 
   // Python Frameworks
   if (frameworkKey === "fastapi") return generateFastApiDockerfile(metadata);
@@ -69,7 +84,7 @@ export function generateDockerfile(project = {}, plan = {}) {
   if (languageKey === "python") return generatePythonDockerfile(metadata);
 
   // Go
-  if (languageKey === "go" || frameworkKey.includes("go") || frameworkKey.includes("gin") || frameworkKey.includes("fiber")) {
+  if (languageKey === "go" || frameworkKey === "go" || frameworkKey.startsWith("go ") || frameworkKey.includes("gin") || frameworkKey.includes("fiber")) {
     return generateGoDockerfile(metadata);
   }
 
@@ -89,7 +104,7 @@ export function generateDockerfile(project = {}, plan = {}) {
   }
 
   // Static HTML/CSS/JS
-  if (frameworkKey.includes("static") || frameworkKey.includes("html")) {
+  if (frameworkKey.includes("static") || frameworkKey.includes("html") || languageKey === "html") {
     return generateStaticDockerfile(metadata);
   }
 
