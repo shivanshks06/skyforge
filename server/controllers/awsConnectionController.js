@@ -215,7 +215,6 @@ export const saveAwsCredentials = async (req, res) => {
         authType: "ACCESS_KEYS",
         status: "CONNECTED",
         roleArn: null,
-        externalId: null,
       },
       create: {
         userId,

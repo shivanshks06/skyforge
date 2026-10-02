@@ -4,8 +4,8 @@ SkyForge is a split-stack deployment platform:
 
 - `client/`: React 19 + Vite single-page application.
 - `server/`: Express API, Prisma/PostgreSQL persistence, Redis/BullMQ queues, and deployment workers.
-- Static repositories deploy to private S3 origins behind CloudFront Origin Access Control.
-- Container repositories build in Docker, push an immutable ECR image digest, run on ECS Fargate behind an HTTPS CloudFront edge, and are health-checked over HTTPS.
+- Web and API repositories build with Docker (or auto-generate multi-stage production Dockerfiles), push immutable ECR image digests, run on Amazon ECS Fargate behind an Application Load Balancer (ALB), and are health-checked directly.
+- Teardown & One-Click Destroy cleanly removes all provisioned ECS clusters, services, tasks, ALBs, target groups, security groups, IAM roles, secrets, CloudWatch log streams, and ECR repositories.
 
 A deployment is not marked `LIVE` until its build, cloud rollout, and endpoint health probe succeed. Failed or incomplete operations remain failed.
 
@@ -63,8 +63,6 @@ https://<api-host>/api/github/callback
 
 OAuth state is bound to an HttpOnly cookie. Do not put JWTs in OAuth URLs.
 
-For local static previews only, set `SERVE_DEPLOYMENT_ARTIFACTS=true` to expose `/live/:projectId`. The route is disabled by default, serves only a database-verified `LIVE`/`ROLLED_BACK` static build from that deployment’s isolated `generated/<project>/deployments/<deployment>/dist` directory, rejects symlinks, and never falls back to repository source files. The included server image does not contain the client bundle; use the separate Compose client or provide a combined image before enabling `SERVE_CLIENT`.
-
 ## Reproducible local deployment stack
 
 Docker Compose starts PostgreSQL, Redis, a one-shot migration job, the API, the worker, and the Nginx-served client:
@@ -86,8 +84,23 @@ The worker uses the host Docker socket only for this local topology. Container b
 
 The Settings screen supports:
 
-1. **IAM role (recommended):** set `SKYFORGE_AWS_ACCOUNT_ID` on the SkyForge server, download the CloudFormation template, create the role in the target account, and verify the role ARN. The SkyForge runtime also needs a workload identity or other base credentials capable of assuming that role.
-2. **AWS access keys:** long-lived keys or temporary STS keys are verified with STS and encrypted before storage. Temporary credentials must include their session token. Secrets are never returned by the API after saving. Prefer the role flow.
+1. **IAM role (recommended for production):** set `SKYFORGE_AWS_ACCOUNT_ID` to the AWS account hosting the SkyForge API and worker, download the CloudFormation template, create the customer deployment role in the target account, and verify the role ARN. The SkyForge runtime must use an ECS task role or another workload identity with `sts:AssumeRole` permission; customer access keys are not required.
+2. **AWS access keys (fallback only):** long-lived keys or temporary STS keys are verified with STS and encrypted before storage. Temporary credentials must include their session token. Secrets are never returned by the API after saving. Do not use this path for the public SaaS flow.
+
+For the public SaaS deployment, run the API and worker on ECS/Fargate with a platform task role that grants only `sts:AssumeRole` on the customer deployment-role ARN pattern (for example, `arn:aws:iam::*:role/SkyForgeDeploymentRole-*`). Each customer role uses the SkyForge account as its trusted principal plus a unique External ID. SkyForge stores the role ARN, account ID, region, and External ID, then obtains short-lived credentials per job.
+
+### Local role-flow testing without stored access keys
+
+The local API and worker still need a bootstrap identity to call STS. Use AWS IAM Identity Center (SSO), not customer access keys:
+
+1. Install AWS CLI v2 and run `aws configure sso --profile skyforge-platform`.
+2. Sign in with `aws sso login --profile skyforge-platform`.
+3. Verify the profile with `aws sts get-caller-identity --profile skyforge-platform`.
+4. Copy `docker-compose.aws-profile.yml.example` to `docker-compose.aws-profile.yml`.
+5. Set `AWS_PROFILE=skyforge-platform` and `AWS_CONFIG_DIR` to your local `.aws` directory.
+6. Start Compose with both files: `docker compose -f docker-compose.yml -f docker-compose.aws-profile.yml up -d`.
+
+The profile is mounted read-only into the API and worker containers. It is only the local SkyForge runtime identity; end users still connect their own accounts through the CloudFormation role flow.
 
 Review the generated IAM policy before applying it in a production AWS account.
 
@@ -96,11 +109,11 @@ Review the generated IAM policy before applying it in a production AWS account.
 1. The API validates ownership, repository identity, target, required environment variables, AWS connectivity, and Redis availability.
 2. BullMQ stores deployment IDs and non-secret job metadata; credentials are resolved inside the worker.
 3. The worker downloads a GitHub archive without shell interpolation, bounds archive resources, and rejects symlinks and secret-like files.
-4. Static builds run in a disposable Node container. Output is validated, uploaded to a private S3 bucket, and served through CloudFront OAC. CloudFront invalidations complete before the deployment is health-checked.
-5. Container builds run with Docker. Images receive unique tags and are recorded by ECR digest before ECS rollout.
-6. ECS uses separate ALB and task security groups, a health-checked target group, and a CloudFront HTTPS edge.
-7. A real HTTPS HTTP probe must pass before the deployment becomes `LIVE`.
-8. Monitoring, rollback, and teardown use durable Redis jobs and recorded AWS resource manifests. Rollback is health-checked; teardown remains failed if AWS resources cannot be removed or verified.
+4. Web & dynamic builds run with Docker. Container images receive unique tags and are recorded by ECR digest before ECS rollout.
+5. Automated multi-stage Dockerfile generation is provided for popular frameworks (Node/Express, Next.js, Python/FastAPI/Flask/Django, Go, Rust, Java/Spring Boot, Laravel, React/Vite/SPA).
+6. ECS uses separate ALB and task security groups, a health-checked target group, and direct ALB ingress.
+7. A real HTTP health probe on the ALB endpoint must pass before the deployment becomes `LIVE`.
+8. Monitoring, rollback, and teardown use durable Redis jobs and recorded AWS resource manifests. Teardown verifies all provisioned cloud resources are absent.
 
 Static Terraform files generated in the Infrastructure screen are **reference previews**. The live worker uses the AWS SDK path; generated files are not the production source of truth.
 

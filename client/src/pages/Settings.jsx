@@ -46,7 +46,7 @@ export default function Settings() {
   const [awsLoading, setAwsLoading] = useState(true);
   const [awsConnected, setAwsConnected] = useState(false);
   const [awsData, setAwsData] = useState(null);
-  const [activeAwsTab, setActiveAwsTab] = useState("keys"); // "keys" | "role"
+  const [activeAwsTab, setActiveAwsTab] = useState("role"); // "keys" | "role"
   const [accessKeyIdInput, setAccessKeyIdInput] = useState("");
   const [secretAccessKeyInput, setSecretAccessKeyInput] = useState("");
   const [sessionTokenInput, setSessionTokenInput] = useState("");
@@ -357,6 +357,20 @@ export default function Settings() {
                 >
                   Update Keys
                 </Button>
+                {awsData?.authType === "ACCESS_KEYS" && (
+                  <Button
+                    variant="outline"
+                    size="sm"
+                    onClick={() => {
+                      setIsEditingKeys(true);
+                      setActiveAwsTab("role");
+                    }}
+                    icon={Cloud}
+                    className="text-xs"
+                  >
+                    Switch to IAM Role
+                  </Button>
+                )}
                 <Button
                   variant="ghost"
                   size="sm"
@@ -383,7 +397,7 @@ export default function Settings() {
                 )}
               </span>
               <span className="text-[#2E6B4F] font-semibold flex items-center gap-1">
-                <Check className="h-3.5 w-3.5" /> Ready for Real S3 & ECS Deployment
+                <Check className="h-3.5 w-3.5" /> Ready for ECS Fargate Deployment
               </span>
             </div>
           </div>
@@ -427,7 +441,7 @@ export default function Settings() {
                 }`}
               >
                 <Cloud className="h-3.5 w-3.5" />
-                IAM Role (CloudFormation)
+                IAM Role (Recommended)
               </button>
             </div>
 
@@ -519,7 +533,7 @@ export default function Settings() {
                   </div>
                   <div className="flex items-end">
                     <p className="text-[11px] text-[#8C7667] pb-2">
-                      * Private S3 origins, CloudFront edges, and ECS resources will be created in this AWS region.
+                      * ECS clusters, services, and Application Load Balancers will be created in this AWS region.
                     </p>
                   </div>
                 </div>
@@ -562,7 +576,7 @@ export default function Settings() {
                       Step 1: Your Unique Security External ID
                     </span>
                     <p className="text-xs text-[#5E4C3E] mt-0.5">
-                      AWS uses this identifier in the Trust Policy to verify that only SkyForge can assume your role.
+                      Recommended for production: SkyForge uses temporary STS credentials and does not store your AWS access keys.
                     </p>
                   </div>
                   <div className="flex items-center gap-2 shrink-0">

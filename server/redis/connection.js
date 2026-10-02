@@ -1,4 +1,4 @@
-import "dotenv/config";
+import "../config/env.js";
 import Redis from "ioredis";
 
 function getRedisOptions() {

@@ -20,7 +20,7 @@ import { AuthContext } from "../context/authContext.js";
 import { getGithubLoginUrl, getProjects, createProject, deleteProject } from "../services/api";
 
 const PRESETS = {
-  REACT_VITE: { label: "React / Vite / SPA", framework: "React + Vite", language: "JavaScript", packageManager: "npm", buildTool: "Vite", buildCommand: "npm run build", startCommand: "npm run preview", port: 80, deploymentTarget: "AWS S3 + CloudFront" },
+  REACT_VITE: { label: "React / Vite / SPA", framework: "React + Vite", language: "JavaScript", packageManager: "npm", buildTool: "Vite", buildCommand: "npm run build", startCommand: "npm run preview", port: 80, deploymentTarget: "AWS ECS Fargate" },
   NEXTJS: { label: "Next.js (Fullstack / SSR)", framework: "Next.js", language: "TypeScript", packageManager: "npm", buildTool: "Next.js", buildCommand: "npm run build", startCommand: "npm start", port: 3000, deploymentTarget: "AWS ECS Fargate" },
   EXPRESS: { label: "Node.js / Express Backend", framework: "Express", language: "JavaScript", packageManager: "npm", buildTool: "Node.js", buildCommand: "", startCommand: "node server.js", port: 5000, deploymentTarget: "AWS ECS Fargate" },
   FASTAPI: { label: "Python FastAPI", framework: "FastAPI", language: "Python", packageManager: "pip", buildTool: "Uvicorn", buildCommand: "", startCommand: "uvicorn main:app --host 0.0.0.0 --port 8000", port: 8000, deploymentTarget: "AWS ECS Fargate" },
@@ -30,7 +30,7 @@ const PRESETS = {
   GO: { label: "Go Backend", framework: "Go", language: "Go", packageManager: "go", buildTool: "Go CLI", buildCommand: "CGO_ENABLED=0 go build -o server .", startCommand: "./server", port: 8080, deploymentTarget: "AWS ECS Fargate" },
   RUST: { label: "Rust Backend", framework: "Rust", language: "Rust", packageManager: "cargo", buildTool: "Cargo", buildCommand: "cargo build --release", startCommand: "./target/release/app", port: 8080, deploymentTarget: "AWS ECS Fargate" },
   SPRINGBOOT: { label: "Java Spring Boot", framework: "Spring Boot", language: "Java", packageManager: "maven", buildTool: "Maven", buildCommand: "mvn clean package -DskipTests", startCommand: "java -jar app.jar", port: 8080, deploymentTarget: "AWS ECS Fargate" },
-  STATIC: { label: "Static HTML / CSS / JS", framework: "Static HTML", language: "HTML", packageManager: "none", buildTool: "Nginx", buildCommand: "", startCommand: "", port: 80, deploymentTarget: "AWS S3 + CloudFront" },
+  STATIC: { label: "Static HTML / CSS / JS", framework: "Static HTML", language: "HTML", packageManager: "none", buildTool: "Nginx", buildCommand: "", startCommand: "", port: 80, deploymentTarget: "AWS ECS Fargate" },
 };
 
 export default function Projects() {

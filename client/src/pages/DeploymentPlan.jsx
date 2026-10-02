@@ -14,14 +14,14 @@ import {
   RefreshCw,
   ArrowLeft,
   Sparkles,
-  Key,
   Boxes,
   FileCode,
   Zap,
   Rocket,
   Container
 } from "lucide-react";
-import { getProjectPlan, generateProjectPlan, saveProjectEnvVars } from "../services/api";
+import { getProjectPlan, generateProjectPlan, saveProjectEnvVars, scanProjectEnv } from "../services/api";
+import EnvironmentWizard from "../components/EnvironmentWizard";
 
 export default function DeploymentPlan() {
   const { id } = useParams();
@@ -30,6 +30,7 @@ export default function DeploymentPlan() {
   const [loading, setLoading] = useState(true);
   const [regenerating, setRegenerating] = useState(false);
   const [savingEnv, setSavingEnv] = useState(false);
+  const [scanningEnv, setScanningEnv] = useState(false);
   const [projectData, setProjectData] = useState(null);
   const [plan, setPlan] = useState(null);
   const [blueprints, setBlueprints] = useState(null);
@@ -47,6 +48,19 @@ export default function DeploymentPlan() {
     toastTimer.current = window.setTimeout(() => setToast(null), 3500);
   };
 
+  const handleScanEnv = async ({ silent = false } = {}) => {
+    setScanningEnv(true);
+    try {
+      const res = await scanProjectEnv(id);
+      setProjectData((previous) => ({ ...previous, ...res.project }));
+      if (!silent) showToast("Repository re-scanned for environment variables.");
+    } catch (err) {
+      if (!silent) showToast(err.response?.data?.message || "Could not scan the repository.", "error");
+    } finally {
+      setScanningEnv(false);
+    }
+  };
+
   const loadPlan = async () => {
     const generation = ++loadGeneration.current;
     setLoading(true);
@@ -61,6 +75,7 @@ export default function DeploymentPlan() {
       setPlan(data.plan);
       setBlueprints(data.blueprints);
       setEnvValues(data.project.envConfig || {});
+      if (!data.project.envAnalysis) void handleScanEnv({ silent: true });
     } catch (err) {
       if (generation !== loadGeneration.current) return;
       console.error("Failed to load plan:", err);
@@ -99,14 +114,14 @@ export default function DeploymentPlan() {
     }
   };
 
-  const handleSaveEnvVars = async (e) => {
-    e.preventDefault();
+  const handleSaveEnvVars = async (ignoredEnv) => {
     setSavingEnv(true);
     try {
-      const res = await saveProjectEnvVars(id, envValues);
+      const res = await saveProjectEnvVars(id, envValues, ignoredEnv);
       setProjectData(res.project);
       if (res.blueprints) setBlueprints(res.blueprints);
-      showToast("Environment variables saved! Blueprint updated.");
+      if (res.warnings?.length) showToast(res.warnings[0], "error");
+      else showToast("Environment variables saved! Blueprint updated.");
     } catch (err) {
       console.error("Failed to save environment variables:", err);
       showToast(err.response?.data?.message || "Failed to save environment variables.", "error");
@@ -149,7 +164,6 @@ export default function DeploymentPlan() {
     );
   }
 
-  const requiredEnvList = Array.isArray(projectData.requiredEnv) ? projectData.requiredEnv : [];
   const currentStatus = projectData.status || "Planned";
 
   // State Machine Step Definitions
@@ -356,99 +370,17 @@ export default function DeploymentPlan() {
         </div>
       </div>
 
-      {/* Step 9: Environment Variable Wizard */}
-      <Card glow={false} className="flex flex-col gap-4 bg-white border border-[#EAE1D5]">
-        <div className="flex items-center justify-between border-b border-[#EADFCF] pb-3">
-          <div className="flex items-center gap-2.5">
-            <div className="p-2 rounded-xl bg-[#9E5D2D]/10 text-[#9E5D2D]">
-              <Key className="h-4 w-4" />
-            </div>
-            <div>
-              <h3 className="text-base font-bold text-[#362217]">Environment Variable Wizard</h3>
-              <p className="text-xs text-[#5E4C3E]">
-                Configure required application secrets and endpoints before deploying to ECS Fargate.
-              </p>
-            </div>
-          </div>
-          <span className="text-xs text-[#8C7667] font-semibold">
-            {requiredEnvList.length} variables detected
-          </span>
-        </div>
-
-        {requiredEnvList.length > 0 ? (
-          <form onSubmit={handleSaveEnvVars} className="flex flex-col gap-3">
-            <div className="rounded-2xl border border-[#EAE1D5] overflow-hidden">
-              <table className="w-full text-left text-xs border-collapse">
-                <thead>
-                  <tr className="bg-[#FAF8F5] border-b border-[#EAE1D5] text-[#8C7667] font-bold">
-                    <th className="p-3 w-1/3">Variable Name</th>
-                    <th className="p-3 w-1/4">Status</th>
-                    <th className="p-3">Configured Value</th>
-                  </tr>
-                </thead>
-                <tbody className="divide-y divide-[#EAE1D5]">
-                  {requiredEnvList.map((varName) => {
-                    const isConfigured = envValues[varName] !== undefined && envValues[varName] !== null && String(envValues[varName]).trim() !== "";
-                    return (
-                      <tr key={varName} className="hover:bg-[#FAF8F5]/60 transition">
-                        <td className="p-3 font-mono font-bold text-[#362217]">{varName}</td>
-                        <td className="p-3">
-                          <span
-                            className={`inline-flex items-center gap-1 px-2.5 py-0.5 rounded-full text-[10px] font-bold ${
-                              isConfigured
-                                ? "bg-[#2E6B4F]/10 text-[#2E6B4F] border border-[#2E6B4F]/20"
-                                : "bg-amber-500/10 text-amber-700 border border-amber-500/20"
-                            }`}
-                          >
-                            {isConfigured ? (
-                              <>
-                                <CheckCircle2 className="h-3 w-3" /> Configured
-                              </>
-                            ) : (
-                              <>
-                                <AlertCircle className="h-3 w-3" /> Missing
-                              </>
-                            )}
-                          </span>
-                        </td>
-                        <td className="p-3">
-                          <input
-                            type="password"
-                            autoComplete="new-password"
-                            aria-label={`${varName} value`}
-                            placeholder={`Enter ${varName}...`}
-                            value={envValues[varName] ?? ""}
-                            onChange={(e) =>
-                              setEnvValues({
-                                ...envValues,
-                                [varName]: e.target.value,
-                              })
-                            }
-                            className="w-full rounded-xl border border-[#DCD0C3] bg-white px-3 py-1.5 text-xs text-[#362217] placeholder-[#A39284] outline-none focus:border-[#9E5D2D] focus:ring-1 focus:ring-[#9E5D2D] font-mono shadow-2xs"
-                          />
-                        </td>
-                      </tr>
-                    );
-                  })}
-                </tbody>
-              </table>
-            </div>
-
-            <div className="flex items-center justify-between pt-2">
-              <span className="text-[11px] text-[#8C7667]">
-                Values are encrypted and securely injected into the Fargate Task Definition container secrets.
-              </span>
-              <Button type="submit" size="sm" icon={Check} loading={savingEnv}>
-                Save Environment Variables
-              </Button>
-            </div>
-          </form>
-        ) : (
-          <div className="p-6 rounded-2xl bg-[#FAF8F5] text-center text-xs text-[#8C7667]">
-            No required environment variables detected for this repository. Ready to provision without custom config!
-          </div>
-        )}
-      </Card>
+      {/* Step 9: Environment variables detected from the source */}
+      <EnvironmentWizard
+        key={projectData.envAnalysis?.scannedAt || "unscanned"}
+        project={projectData}
+        envValues={envValues}
+        setEnvValues={setEnvValues}
+        onSave={handleSaveEnvVars}
+        saving={savingEnv}
+        onScan={handleScanEnv}
+        scanning={scanningEnv}
+      />
 
       {/* Blueprint Inspector Tabs (Dockerfile & Terraform) */}
       <Card glow={false} className="flex flex-col gap-4 bg-white border border-[#EAE1D5]">

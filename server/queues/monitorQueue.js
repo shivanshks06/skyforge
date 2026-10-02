@@ -41,3 +41,20 @@ export async function addMonitorJob(data, options = {}) {
 }
 
 export default monitorQueue;
+
+/**
+ * Each monitor job schedules the next, so a worker restart can break the chain. Called at worker
+ * start: re-seeds one job per live deployment that has none pending.
+ */
+export async function ensureMonitoringFor(deployments) {
+  if (!getRedisStatus().connected) return 0;
+  const pending = await monitorQueue.getJobs(["delayed", "waiting", "active"]);
+  const watched = new Set(pending.map((job) => job.data?.deploymentId));
+  let seeded = 0;
+  for (const deployment of deployments) {
+    if (watched.has(deployment.id)) continue;
+    await addMonitorJob({ deploymentId: deployment.id, liveUrl: deployment.liveUrl, target: "ECS_FARGATE" }, { delay: 15_000, jobId: `monitor-${deployment.id}-seed-${Date.now()}` });
+    seeded += 1;
+  }
+  return seeded;
+}

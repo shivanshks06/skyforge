@@ -1,4 +1,7 @@
-import "dotenv/config";
+import "./config/env.js";
+import path from "node:path";
+import fs from "node:fs";
+import { fileURLToPath, pathToFileURL } from "node:url";
 import dns from "node:dns";
 import net from "node:net";
 
@@ -8,11 +11,6 @@ if (typeof dns.setDefaultResultOrder === "function") {
 if (typeof net.setDefaultAutoSelectFamily === "function") {
   net.setDefaultAutoSelectFamily(false);
 }
-
-import path from "node:path";
-import fs from "node:fs";
-import { fileURLToPath } from "node:url";
-import { pathToFileURL } from "node:url";
 import express from "express";
 import cors from "cors";
 import helmet from "helmet";
@@ -73,7 +71,6 @@ if (process.env.NODE_ENV === "production") {
   if (!process.env.REDIS_URL && (!process.env.REDIS_HOST || !process.env.REDIS_PORT)) {
     throw new Error("REDIS_URL or REDIS_HOST/REDIS_PORT is required in production.");
   }
-  if (process.env.ALLOW_HOST_BUILDS === "true") throw new Error("ALLOW_HOST_BUILDS must remain false in production.");
   if (process.env.ALLOW_INLINE_JOBS === "true") throw new Error("ALLOW_INLINE_JOBS must remain false in production.");
   for (const origin of allowedOrigins) {
     const parsedOrigin = new URL(origin);
@@ -136,73 +133,6 @@ app.use("/api/projects", projectRoutes);
 app.use("/api/aws", awsRoutes);
 app.use("/api/deployments", deploymentRoutes);
 
-const generatedRoot = path.resolve(__dirname, "generated");
-if (process.env.SERVE_DEPLOYMENT_ARTIFACTS === "true") {
-  app.use("/live/:projectId", async (req, res) => {
-    const projectId = String(req.params.projectId || "");
-    if (!/^[a-zA-Z0-9_-]+$/.test(projectId)) return res.status(400).send("Invalid project ID");
-
-    try {
-      const blockedDeployment = await prisma.deployment.findFirst({
-        where: { projectId, status: { in: ["DESTROYING", "DESTROY_FAILED"] } },
-        select: { id: true, status: true },
-      });
-      if (blockedDeployment) return res.status(503).send("Infrastructure teardown is not complete.");
-      const activeDeployment = await prisma.deployment.findFirst({
-        where: { projectId, status: { in: ["QUEUED", "BUILDING", "PUSHING", "PROVISIONING", "DEPLOYING", "HEALTH_CHECK", "ROLLING_BACK"] } },
-        select: { id: true },
-      });
-      if (activeDeployment) return res.status(503).send("A deployment is currently being prepared.");
-      const deployment = await prisma.deployment.findFirst({
-        where: { projectId, status: { in: ["LIVE", "ROLLED_BACK"] } },
-        orderBy: { createdAt: "desc" },
-        select: { id: true, status: true, artifactPath: true, resources: true },
-      });
-      if (!deployment || deployment.resources?.type !== "S3_CLOUDFRONT" || !deployment.artifactPath) {
-        return res.status(404).send("No verified static deployment is available.");
-      }
-
-      const projectRoot = path.resolve(generatedRoot, projectId);
-      const expectedDist = path.resolve(projectRoot, "deployments", deployment.id, "dist");
-      const projectDist = path.resolve(deployment.artifactPath);
-      if (projectDist !== expectedDist || !fs.existsSync(projectDist)) {
-        return res.status(404).send("Deployment artifacts are not available.");
-      }
-      const realDist = fs.realpathSync(projectDist);
-      const realProjectRoot = fs.existsSync(projectRoot) ? fs.realpathSync(projectRoot) : projectRoot;
-      if (realDist !== realProjectRoot && !realDist.startsWith(`${realProjectRoot}${path.sep}`)) {
-        return res.status(400).send("Invalid project path");
-      }
-      const safeFile = (candidate) => {
-        if (!fs.existsSync(candidate)) return null;
-        const stat = fs.lstatSync(candidate);
-        if (!stat.isFile() || stat.isSymbolicLink()) return null;
-        const realFile = fs.realpathSync(candidate);
-        if (realFile !== realDist && !realFile.startsWith(`${realDist}${path.sep}`)) return null;
-        return realFile;
-      };
-      const indexFile = safeFile(path.join(realDist, "index.html"));
-      if (!indexFile) return res.status(404).send("Deployment artifacts are not available.");
-
-      let relativePath = "/";
-      try {
-        relativePath = decodeURIComponent(req.path || "/");
-      } catch {
-        return res.status(400).send("Invalid asset path");
-      }
-      const candidate = path.resolve(realDist, `.${relativePath}`);
-      if (candidate !== realDist && !candidate.startsWith(`${realDist}${path.sep}`)) return res.status(400).send("Invalid asset path");
-      const assetFile = relativePath === "/" ? indexFile : safeFile(candidate);
-      if (!assetFile && path.extname(relativePath)) return res.status(404).send("Asset not found");
-      res.set("X-Robots-Tag", "noindex, nofollow");
-      return res.sendFile(assetFile || indexFile);
-    } catch (error) {
-      console.error(`[ARTIFACTS] Could not serve project ${projectId}:`, error);
-      return res.status(503).send("Deployment artifacts are temporarily unavailable.");
-    }
-  });
-}
-
 const clientDist = path.resolve(__dirname, "../client/dist");
 if (process.env.SERVE_CLIENT === "true" && fs.existsSync(clientDist)) {
   app.use(express.static(clientDist, { index: "index.html" }));
@@ -211,9 +141,11 @@ if (process.env.SERVE_CLIENT === "true" && fs.existsSync(clientDist)) {
 
 app.use((_req, res) => res.status(404).json({ message: "Route not found" }));
 app.use((error, _req, res, _next) => {
-  console.error("[API] Unhandled request error:", error);
+  const status = error.statusCode || error.status || 500;
+  if (status >= 500) console.error("[API] Unhandled request error:", error);
   if (res.headersSent) return;
-  res.status(error.statusCode || 500).json({ message: "Internal server error" });
+  // Client errors (malformed JSON, CORS rejection) carry safe messages; never echo 5xx internals.
+  res.status(status).json({ message: status < 500 ? (error.type === "entity.parse.failed" ? "Malformed JSON request body." : error.message) : "Internal server error" });
 });
 
 const port = Number.parseInt(process.env.PORT || "5000", 10);

@@ -119,11 +119,3 @@ export function runCommand(command, args = [], options = {}) {
     else child.stdin.end();
   });
 }
-
-export function assertCommandAvailable(command) {
-  return new Promise((resolve) => {
-    const child = spawn(command, ["--version"], { shell: false, windowsHide: true, stdio: "ignore" });
-    child.once("error", () => resolve(false));
-    child.once("close", (code) => resolve(code === 0));
-  });
-}

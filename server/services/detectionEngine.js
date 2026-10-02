@@ -488,7 +488,10 @@ export async function detectProject(tree, files) {
         return score;
       },
       getBuildCommand: () => "python manage.py collectstatic --noinput",
-      getStartCommand: () => "gunicorn app.wsgi:application --bind 0.0.0.0:8000",
+      getStartCommand: () => {
+        const wsgi = tree.find((f) => /^[A-Za-z_]\w*\/wsgi\.py$/.test(f.path || ""));
+        return wsgi ? `gunicorn ${wsgi.path.split("/")[0]}.wsgi:application --bind 0.0.0.0:8000` : "";
+      },
       buildTool: "Python Pip",
       defaultPort: 8000,
       deploymentTarget: "AWS ECS Fargate",
@@ -576,7 +579,7 @@ export async function detectProject(tree, files) {
       getStartCommand: () => "",
       buildTool: "Static Assets",
       defaultPort: 80,
-      deploymentTarget: "AWS_S3_CLOUDFRONT",
+      deploymentTarget: "AWS ECS Fargate",
     },
     {
       name: "Microservices",
@@ -633,17 +636,6 @@ export async function detectProject(tree, files) {
 
   // Docker Detection
   const { dockerized, dockerStatus } = detectDocker(tree);
-  const frameworkKey = framework.toLowerCase();
-  if (!dockerized && (
-    frameworkKey.includes("react")
-    || frameworkKey.includes("vue")
-    || frameworkKey.includes("angular")
-    || (frameworkKey.includes("svelte") && !frameworkKey.includes("kit"))
-    || frameworkKey.includes("static html")
-    || frameworkKey === "static"
-  )) {
-    deploymentTarget = "AWS_S3_CLOUDFRONT";
-  }
 
   // Environment Variables Detection
   const requiredEnv = detectEnvironmentVariables(files);

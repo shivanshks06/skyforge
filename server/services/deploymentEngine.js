@@ -2,6 +2,7 @@ import { getRepositoryTreeWithRef, getFile } from "./githubService.js";
 import { detectProject, IMPORTANT_FILES } from "./detectionEngine.js";
 import { generateDeploymentPlan } from "./aiPlanner.js";
 import { generateDockerfile } from "./templateEngine.js";
+import { scanGitHubRepository } from "./envScanner.js";
 
 export async function analyzeRepository({ owner, repo, branch = "main", token = null }) {
   const { tree, ref: resolvedBranch } = await getRepositoryTreeWithRef(owner, repo, branch, token);
@@ -20,6 +21,15 @@ export async function analyzeRepository({ owner, repo, branch = "main", token = 
   }));
 
   const detection = await detectProject(tree, filesContent);
+  try {
+    const envAnalysis = await scanGitHubRepository({ owner, repo, ref: resolvedBranch, token });
+    if (envAnalysis) {
+      detection.envAnalysis = { ...envAnalysis, ignored: [] };
+      detection.requiredEnv = envAnalysis.variables.filter((variable) => variable.required).map((variable) => variable.name);
+    }
+  } catch (error) {
+    console.warn(`[ANALYSIS] Environment scan skipped for ${owner}/${repo}: ${error.message}`);
+  }
   const plan = await generateDeploymentPlan(detection);
   const dockerfile = filesContent.Dockerfile || generateDockerfile(detection, plan);
   return {

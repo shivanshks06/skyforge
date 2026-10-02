@@ -5,6 +5,8 @@ import { requireOwnedProject } from "../services/ownershipService.js";
 import { decryptObjectValues, encryptObjectValues, MASKED_SECRET, maskObjectValues } from "../services/secretService.js";
 import { toPublicProject } from "../services/projectSerializer.js";
 import { assertProjectHasNoActiveOperation } from "../services/operationGuard.js";
+import { effectiveRequiredEnv, localhostWarnings, scanGitHubRepository } from "../services/envScanner.js";
+import { decryptSecret as decryptToken } from "../services/secretService.js";
 
 function validateEnvValues(envValues) {
   if (!envValues || typeof envValues !== "object" || Array.isArray(envValues)) {
@@ -133,7 +135,13 @@ export const updateEnvVars = async (req, res) => {
     for (const [key, value] of Object.entries(submittedValues)) {
       if (value !== MASKED_SECRET) envValues[key] = value;
     }
-    const requiredEnvList = Array.isArray(project.requiredEnv) ? project.requiredEnv : [];
+    // Variables the user marked "not needed" (false positives) stop blocking deployment.
+    const knownNames = new Set([...(project.requiredEnv || []), ...((project.envAnalysis?.variables || []).map((variable) => variable.name))]);
+    const ignoredEnv = Array.isArray(req.body?.ignoredEnv)
+      ? [...new Set(req.body.ignoredEnv.map(String).filter((name) => knownNames.has(name)))].slice(0, 100)
+      : project.envAnalysis?.ignored || [];
+    const envAnalysis = { ...(project.envAnalysis || { variables: [], services: [] }), ignored: ignoredEnv };
+    const requiredEnvList = effectiveRequiredEnv({ requiredEnv: project.requiredEnv, envAnalysis });
     const allFilled = requiredEnvList.every(
       (key) => envValues[key] !== undefined && envValues[key] !== null && String(envValues[key]).trim() !== "",
     );
@@ -146,6 +154,7 @@ export const updateEnvVars = async (req, res) => {
       where: { id: project.id },
       data: {
         envConfig: encryptObjectValues(envValues),
+        envAnalysis,
         configVersion: { increment: 1 },
         status: nextStatus,
       },
@@ -156,6 +165,7 @@ export const updateEnvVars = async (req, res) => {
       message: "Environment variables saved successfully",
       project: exposeProject(updatedProject),
       blueprints: buildBlueprints(updatedProject, plan),
+      warnings: localhostWarnings(envValues).map((name) => `${name} points to localhost, which on AWS is the container itself. Use the real hosted or public address.`),
     });
   } catch (error) {
     console.error("Error updating environment variables:", error);
@@ -163,5 +173,37 @@ export const updateEnvVars = async (req, res) => {
     return res.status(error.statusCode || (isInputError ? 400 : 500)).json({
       message: isInputError ? error.message : "Failed to update environment variables",
     });
+  }
+};
+
+export const scanEnvironment = async (req, res) => {
+  try {
+    const project = await requireOwnedProject(req.params.id, req.user?.id);
+    await assertProjectHasNoActiveOperation(project.id);
+    const [owner, repo] = String(project.repoName || "").split("/");
+    const account = await prisma.gitHubAccount.findUnique({ where: { userId: project.userId } });
+    const token = account ? decryptToken(account.accessToken) : null;
+    let result = null;
+    try {
+      result = await scanGitHubRepository({ owner, repo, ref: project.branch, token });
+    } catch (error) {
+      // The configured branch may be gone; deployments fall back to the default branch too.
+      if (error.response?.status !== 404) throw error;
+      result = await scanGitHubRepository({ owner, repo, ref: null, token });
+    }
+    if (!result) return res.status(413).json({ message: "The repository is too large to scan from GitHub; it will be scanned during deployment." });
+
+    const ignored = (project.envAnalysis?.ignored || []).filter((name) => result.variables.some((variable) => variable.name === name));
+    const updatedProject = await prisma.project.update({
+      where: { id: project.id },
+      data: {
+        envAnalysis: { ...result, ignored },
+        requiredEnv: result.variables.filter((variable) => variable.required).map((variable) => variable.name),
+      },
+    });
+    return res.json({ project: exposeProject(updatedProject) });
+  } catch (error) {
+    console.error("Error scanning environment variables:", error.response?.status || error.message);
+    return res.status(error.statusCode || 502).json({ message: "Could not scan the repository for environment variables." });
   }
 };

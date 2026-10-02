@@ -10,15 +10,11 @@ test("framework template selection is case-insensitive and supports Laravel", ()
   assert.match(dockerfile, /EXPOSE 8000/);
 });
 
-test("Go templates normalize a custom output binary to the runtime path", () => {
-  const dockerfile = generateDockerfile({
-    framework: "Go (Gin)",
-    language: "Go",
-    buildCommand: "CGO_ENABLED=0 go build -o main .",
-    port: 8080,
-  });
-  assert.match(dockerfile, /cp "\/app\/main" \/app\/server/);
-  assert.match(dockerfile, /CMD \["\.\/server"\]/);
+test("Go templates discover the main package and follow the go.mod toolchain", () => {
+  const dockerfile = generateDockerfile({ framework: "Go (Gin)", language: "Go", port: 8080 });
+  assert.match(dockerfile, /GOTOOLCHAIN=auto/);
+  assert.match(dockerfile, /go list -f '\{\{if eq \.Name "main"\}\}/);
+  assert.match(dockerfile, /CMD \["server"\]/);
 });
 
 test("Next.js templates create an optional public directory and honor the start command", () => {
@@ -33,9 +29,10 @@ test("Next.js templates create an optional public directory and honor the start 
   assert.match(dockerfile, /CMD \["sh", "-c", "npm run start"\]/);
 });
 
-test("Rust templates map release binary paths into the runtime image", () => {
-  const dockerfile = generateDockerfile({ framework: "Rust", language: "Rust", startCommand: "./target/release/app", port: 8080 });
-  assert.match(dockerfile, /CMD \["sh", "-c", "\/app\/bin\/app"\]/);
+test("Rust templates prefer the package binary and run it on glibc", () => {
+  const dockerfile = generateDockerfile({ framework: "Rust", language: "Rust", binaryName: "app", port: 8080 });
+  assert.match(dockerfile, /BIN="target\/release\/app"/);
+  assert.match(dockerfile, /FROM debian:bookworm-slim/);
 });
 
 test("Spring Boot selects the matching Maven or Gradle builder", () => {
@@ -44,7 +41,7 @@ test("Spring Boot selects the matching Maven or Gradle builder", () => {
   assert.match(gradle, /build\/libs/);
 });
 
-test("repository detection defaults non-Docker React apps to static hosting", async () => {
+test("repository detection defaults non-Docker React apps to ECS Fargate", async () => {
   const tree = [
     { path: "package.json", type: "blob" },
     { path: "vite.config.ts", type: "blob" },
@@ -57,5 +54,14 @@ test("repository detection defaults non-Docker React apps to static hosting", as
   };
   const detection = await detectProject(tree, files);
   assert.equal(detection.framework, "React + Vite");
-  assert.equal(detection.deploymentTarget, "AWS_S3_CLOUDFRONT");
+  assert.equal(detection.deploymentTarget, "AWS ECS Fargate");
+});
+
+test("Django detection derives the WSGI module from the project package", async () => {
+  const tree = ["manage.py", "todoApp/__init__.py", "todoApp/settings.py", "todoApp/wsgi.py"].map((path) => ({ path, type: "blob" }));
+  const detection = await detectProject(tree, { "manage.py": "import django" });
+  assert.equal(detection.startCommand, "gunicorn todoApp.wsgi:application --bind 0.0.0.0:8000");
+  const dockerfile = generateDockerfile({ framework: "Django", language: "Python", port: 8000, startCommand: detection.startCommand });
+  assert.match(dockerfile, /else \\\s+pip install --no-cache-dir django;/);
+  assert.match(dockerfile, /gunicorn todoApp\.wsgi:application/);
 });

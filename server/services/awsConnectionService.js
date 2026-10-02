@@ -14,6 +14,15 @@ function getSkyForgeAccountId() {
   return accountId;
 }
 
+function wrapRoleCredentialError(error) {
+  if (/Could not load credentials from any providers|CredentialsProviderError/i.test(error?.message || "")) {
+    return new Error(
+      "SkyForge cannot assume the connected AWS role because its API/worker runtime has no AWS IAM identity. Run SkyForge on ECS/Fargate with a task role that allows sts:AssumeRole, or configure an AWS SSO/profile identity for local development.",
+    );
+  }
+  return error;
+}
+
 export function generateCloudFormationTemplate(externalId, skyforgeAccountId = getSkyForgeAccountId(), region = "ap-south-1") {
   if (!/^skyforge_[a-f0-9]{16,64}$/.test(externalId || "")) {
     throw new Error("A valid SkyForge external ID is required.");
@@ -68,7 +77,7 @@ export function generateCloudFormationTemplate(externalId, skyforgeAccountId = g
                   Action: [
                     "ecr:GetAuthorizationToken", "ecr:BatchCheckLayerAvailability", "ecr:GetDownloadUrlForLayer",
                     "ecr:BatchGetImage", "ecr:PutImage", "ecr:InitiateLayerUpload", "ecr:UploadLayerPart",
-                    "ecr:CompleteLayerUpload", "ecr:CreateRepository", "ecr:DescribeRepositories", "ecr:DescribeImages", "ecr:ListTagsForResource",
+                    "ecr:CompleteLayerUpload", "ecr:CreateRepository", "ecr:DescribeRepositories", "ecr:DescribeImages", "ecr:ListTagsForResource", "ecr:TagResource",
                     "ecr:DeleteRepository",
                   ],
                   Resource: "*",
@@ -96,7 +105,7 @@ export function generateCloudFormationTemplate(externalId, skyforgeAccountId = g
                     "ec2:RevokeSecurityGroupIngress",
                     "elasticloadbalancing:CreateLoadBalancer", "elasticloadbalancing:DeleteLoadBalancer",
                     "elasticloadbalancing:DescribeLoadBalancers", "elasticloadbalancing:CreateTargetGroup",
-                    "elasticloadbalancing:DeleteTargetGroup", "elasticloadbalancing:DescribeTargetGroups", "elasticloadbalancing:ModifyTargetGroup",
+                    "elasticloadbalancing:DeleteTargetGroup", "elasticloadbalancing:DescribeTargetGroups", "elasticloadbalancing:ModifyTargetGroup", "elasticloadbalancing:ModifyTargetGroupAttributes", "elasticloadbalancing:DescribeTargetHealth",
                     "elasticloadbalancing:CreateListener", "elasticloadbalancing:DeleteListener", "elasticloadbalancing:ModifyListener",
                     "elasticloadbalancing:DescribeListeners", "elasticloadbalancing:AddTags", "elasticloadbalancing:RemoveTags",
                   ],
@@ -110,7 +119,22 @@ export function generateCloudFormationTemplate(externalId, skyforgeAccountId = g
                     "iam:PassRole", "iam:ListAttachedRolePolicies",
                     "logs:CreateLogGroup", "logs:DeleteLogGroup", "logs:DescribeLogGroups",
                     "secretsmanager:CreateSecret", "secretsmanager:DescribeSecret", "secretsmanager:PutSecretValue", "secretsmanager:DeleteSecret",
-                    "logs:CreateLogStream", "logs:PutLogEvents",
+                    "logs:CreateLogStream", "logs:PutLogEvents", "logs:GetLogEvents",
+                  ],
+                  Resource: "*",
+                },
+                {
+                  Sid: "SecurityFeatures",
+                  Effect: "Allow",
+                  Action: [
+                    "wafv2:CreateWebACL", "wafv2:UpdateWebACL", "wafv2:DeleteWebACL", "wafv2:GetWebACL", "wafv2:ListWebACLs",
+                    "wafv2:AssociateWebACL", "wafv2:DisassociateWebACL", "wafv2:GetWebACLForResource", "wafv2:ListResourcesForWebACL",
+                    "wafv2:CreateIPSet", "wafv2:UpdateIPSet", "wafv2:DeleteIPSet", "wafv2:GetIPSet", "wafv2:ListIPSets",
+                    "wafv2:GetSampledRequests", "wafv2:TagResource",
+                    "elasticloadbalancing:SetWebAcl", "elasticloadbalancing:ModifyLoadBalancerAttributes", "elasticloadbalancing:DescribeRules", "elasticloadbalancing:CreateRule", "elasticloadbalancing:DeleteRule",
+                    "iam:CreateUser", "iam:GetUser", "iam:DeleteUser", "iam:TagUser", "iam:CreateAccessKey", "iam:DeleteAccessKey",
+                    "iam:ListAccessKeys", "iam:GetAccessKeyLastUsed",
+                    "ecr:PutImageScanningConfiguration", "ecr:DescribeImageScanFindings", "ecr:StartImageScan",
                   ],
                   Resource: "*",
                 },
@@ -142,12 +166,17 @@ export async function verifyAwsConnection({ roleArn, externalId, region = "ap-so
 
   const [, partition, accountId, roleName] = arnMatch;
   const stsClient = new STSClient({ region });
-  const response = await stsClient.send(new AssumeRoleCommand({
-    RoleArn: roleArn.trim(),
-    RoleSessionName: `skyforge-verify-${Date.now()}`,
-    ExternalId: externalId,
-    DurationSeconds: 900,
-  }));
+  let response;
+  try {
+    response = await stsClient.send(new AssumeRoleCommand({
+      RoleArn: roleArn.trim(),
+      RoleSessionName: `skyforge-verify-${Date.now()}`,
+      ExternalId: externalId,
+      DurationSeconds: 900,
+    }));
+  } catch (error) {
+    throw wrapRoleCredentialError(error);
+  }
 
   if (!response.Credentials?.AccessKeyId) throw new Error("AWS did not return usable role credentials.");
 
@@ -192,12 +221,17 @@ export async function getAwsCredentials(connection) {
 
   if (connection.authType === "ROLE_ARN" && connection.roleArn) {
     if (!connection.externalId) throw new Error("The AWS role connection is missing its external ID. Reconnect the AWS account.");
-    const response = await new STSClient({ region: connection.region || "ap-south-1" }).send(new AssumeRoleCommand({
-      RoleArn: connection.roleArn,
-      RoleSessionName: `skyforge-deploy-${Date.now()}`,
-      ExternalId: connection.externalId,
-      DurationSeconds: 3600,
-    }));
+    let response;
+    try {
+      response = await new STSClient({ region: connection.region || "ap-south-1" }).send(new AssumeRoleCommand({
+        RoleArn: connection.roleArn,
+        RoleSessionName: `skyforge-deploy-${Date.now()}`,
+        ExternalId: connection.externalId,
+        DurationSeconds: 3600,
+      }));
+    } catch (error) {
+      throw wrapRoleCredentialError(error);
+    }
 
     if (!response.Credentials) throw new Error("AWS did not return usable deployment credentials.");
     return {

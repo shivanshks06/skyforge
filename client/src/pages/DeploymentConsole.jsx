@@ -87,7 +87,7 @@ const STAGES = [
   { id: "BUILDING", label: "Building", desc: "Multi-stage Docker build" },
   { id: "PUSHING", label: "Pushing", desc: "Push container to AWS ECR" },
   { id: "PROVISIONING", label: "Provisioning", desc: "Terraform VPC & ECS" },
-  { id: "DEPLOYING", label: "Deploying", desc: "ECS Service / S3 Sync" },
+  { id: "DEPLOYING", label: "Deploying", desc: "ECS Service Rollout" },
   { id: "HEALTH_CHECK", label: "Health Check", desc: "HTTP 200 Probe & Latency" },
   { id: "COMPLETE", label: "Live", desc: "Production traffic active" },
 ];
@@ -600,6 +600,15 @@ export default function DeploymentConsole() {
             Terraform IaC
           </Button>
 
+          <Button
+            variant="outline"
+            onClick={() => navigate(`/project/${id}/security`)}
+            className="border-[#EADFCF] bg-white text-[#5E4C3E] flex items-center gap-1.5"
+          >
+            <ShieldCheck className="h-4 w-4 text-[#9E5D2D]" />
+            Security & Uptime
+          </Button>
+
           {hasLiveEndpoint && (
             <Button
               variant="outline"
@@ -960,7 +969,7 @@ export default function DeploymentConsole() {
                 All AWS Cloud Infrastructure Destroyed
               </h3>
               <p className="text-xs text-[#5E4C3E] max-w-xl">
-                Recorded ECS, ECR, S3, CloudFront, IAM, load-balancer, security-group, secret, and log resources were verified absent. Unrelated resources in the connected account are left untouched.
+                Recorded ECS, ECR, ALB load balancer, security group, IAM, secret, and log resources were verified absent. Unrelated resources in the connected account are left untouched.
               </p>
             </div>
           </div>
@@ -1126,7 +1135,7 @@ export default function DeploymentConsole() {
             </div>
 
             <p className="text-xs text-[#5E4C3E] leading-relaxed">
-              The rollback worker restores the compatible previous task definition (or S3 release), waits for ECS service stability and CloudFront invalidation as applicable, then verifies the live endpoint.
+              The rollback worker restores the compatible previous task definition, waits for ECS service stability, then verifies the live endpoint.
             </p>
 
             <div className="flex flex-col gap-1.5">
@@ -1188,40 +1197,55 @@ export default function DeploymentConsole() {
               <p className="text-[11px] leading-relaxed text-[#5E4C3E]">
                 This will assume your connected IAM role (<strong>{awsData?.accountId || "Connected Account"}</strong> in <strong>{awsData?.region || "ap-south-1"}</strong>) and forcefully decommission every resource associated with this project:
               </p>
-              <ul className="grid grid-cols-2 gap-1.5 mt-1 font-mono text-[10px] text-[#362217]">
+              <ul className="grid grid-cols-1 sm:grid-cols-2 gap-1.5 mt-1 font-mono text-[10px] text-[#362217]">
                 <li className="flex items-center gap-1.5">
                   <span className="h-1.5 w-1.5 rounded-full bg-[#9E2A2B]" />
-                  ECS Fargate Cluster & Service
+                  ECS Fargate cluster, service & task definitions
                 </li>
                 <li className="flex items-center gap-1.5">
                   <span className="h-1.5 w-1.5 rounded-full bg-[#9E2A2B]" />
-                  Application Load Balancer & TGs
+                  Application Load Balancer, listener & target group
                 </li>
                 <li className="flex items-center gap-1.5">
                   <span className="h-1.5 w-1.5 rounded-full bg-[#9E2A2B]" />
-                  ECR Repository & Docker Images
+                  ECR repository & all images
                 </li>
                 <li className="flex items-center gap-1.5">
                   <span className="h-1.5 w-1.5 rounded-full bg-[#9E2A2B]" />
-                  S3 Static Assets & Origin
+                  Secrets Manager secret (environment values)
                 </li>
                 <li className="flex items-center gap-1.5">
                   <span className="h-1.5 w-1.5 rounded-full bg-[#9E2A2B]" />
-                  CloudFront CDN Distribution
+                  WAF firewall & ban list (Protected tier)
                 </li>
                 <li className="flex items-center gap-1.5">
                   <span className="h-1.5 w-1.5 rounded-full bg-[#9E2A2B]" />
-                  Project Security Groups (shared VPC retained)
+                  Canary IAM user & access key
                 </li>
                 <li className="flex items-center gap-1.5">
                   <span className="h-1.5 w-1.5 rounded-full bg-[#9E2A2B]" />
-                  CloudWatch Log Streams
+                  IAM execution & task roles
                 </li>
                 <li className="flex items-center gap-1.5">
                   <span className="h-1.5 w-1.5 rounded-full bg-[#9E2A2B]" />
-                  Local Build Workspaces
+                  Project security groups (shared VPC kept)
+                </li>
+                <li className="flex items-center gap-1.5">
+                  <span className="h-1.5 w-1.5 rounded-full bg-[#9E2A2B]" />
+                  CloudWatch log group
+                </li>
+                <li className="flex items-center gap-1.5">
+                  <span className="h-1.5 w-1.5 rounded-full bg-[#9E2A2B]" />
+                  Legacy S3 / CloudFront releases
+                </li>
+                <li className="flex items-center gap-1.5">
+                  <span className="h-1.5 w-1.5 rounded-full bg-[#9E2A2B]" />
+                  Local build workspace
                 </li>
               </ul>
+              <p className="mt-2 text-[11px] leading-relaxed text-[#2E6B4F]">
+                Afterwards SkyForge searches your AWS account for anything else named for this project and only reports success once AWS confirms nothing is left, so the project stops incurring charges. To pause instead, use <strong>Take site offline</strong> on the Security page.
+              </p>
             </div>
 
             <div className="flex items-center justify-end gap-3 pt-1">
@@ -1374,7 +1398,7 @@ export default function DeploymentConsole() {
               </div>
 
               <p className="text-[11px] text-[#8C7667] leading-relaxed">
-                Credentials are encrypted at rest and verified using AWS STS. They are used for the selected private S3/CloudFront or ECS deployment path.
+                Credentials are encrypted at rest and verified using AWS STS. They are used for the ECS Fargate and Application Load Balancer deployment path.
               </p>
 
               <div className="flex items-center justify-end gap-2.5 pt-2 border-t border-[#EAE1D5]">

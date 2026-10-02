@@ -11,6 +11,7 @@ import { decryptObjectValues, maskObjectValues } from "../services/secretService
 import { getRedisStatus } from "../redis/connection.js";
 import { toPublicDeployment } from "../services/deploymentSerializer.js";
 import { toPublicProject } from "../services/projectSerializer.js";
+import { effectiveRequiredEnv } from "../services/envScanner.js";
 import { uniqueResources, validateResourceManifests } from "../services/resourceUtils.js";
 
 const ACTIVE_STATUSES = ["QUEUED", "BUILDING", "PUSHING", "PROVISIONING", "DEPLOYING", "HEALTH_CHECK", "ROLLING_BACK", "DESTROYING"];
@@ -51,29 +52,6 @@ async function buildTeardownSnapshot(tx, projectId) {
   }
 }
 
-function targetFor(project) {
-  const value = String(project.deploymentTarget || "").toUpperCase();
-  if (value.includes("S3") || value.includes("CLOUDFRONT") || value === "STATIC") return "AWS_S3_CLOUDFRONT";
-  return "AWS_ECS_FARGATE";
-}
-
-function isStaticProject(project) {
-  const framework = String(project.framework || "").toLowerCase();
-  const language = String(project.language || "").toLowerCase();
-  return !project.dockerized && (
-    framework.includes("static")
-    || framework.includes("html")
-    || framework.includes("react")
-    || framework.includes("vue")
-    || framework.includes("angular")
-    || (framework.includes("svelte") && !framework.includes("kit"))
-    || framework.includes("generic")
-    || language.includes("html")
-    || language.includes("javascript")
-    || language.includes("typescript")
-  );
-}
-
 async function credentialsForProject(project) {
   const connection = await prisma.awsConnection.findUnique({ where: { userId: project.userId } });
   if (connection) {
@@ -102,11 +80,7 @@ async function preflight(project) {
     blockers.push(error.message);
   }
 
-  const target = targetFor(project);
-  if (target === "AWS_S3_CLOUDFRONT" && !isStaticProject(project)) {
-    blockers.push("S3 and CloudFront are only available for static frontend projects.");
-  }
-  const required = Array.isArray(project.requiredEnv) ? project.requiredEnv : [];
+  const required = effectiveRequiredEnv(project);
   const configured = decryptObjectValues(project.envConfig || {});
   for (const key of required) {
     if (configured[key] === undefined || configured[key] === null || String(configured[key]).trim() === "") blockers.push(`Environment variable ${key} is not configured.`);
@@ -114,16 +88,13 @@ async function preflight(project) {
   if (!/^[A-Za-z0-9_.-]+\/[A-Za-z0-9_.-]+$/.test(project.repoName) || project.repoName.includes("..")) blockers.push("The GitHub repository identity is invalid.");
   if (!/^[\w./-]+$/.test(project.branch || "") || String(project.branch || "").includes("..")) blockers.push("The Git branch name is invalid.");
   if (!credentials?.region) blockers.push("AWS region is not configured.");
-  if (targetFor(project) === "AWS_S3_CLOUDFRONT" && !/^\d{12}$/.test(credentials?.accountId || "")) {
-    blockers.push("A 12-digit AWS account ID is required for globally unique static bucket names.");
-  }
   return { blockers };
 }
 
 export const triggerDeployment = async (req, res) => {
   try {
     const project = await requireOwnedProject(req.params.projectId, req.user?.id);
-    const target = targetFor(project);
+    const target = "AWS_ECS_FARGATE";
     const { blockers } = await preflight(project);
     if (blockers.length) return res.status(422).json({ message: "Deployment preflight failed", blockers });
     if (!getRedisStatus().connected && process.env.ALLOW_INLINE_JOBS !== "true") {
@@ -208,7 +179,7 @@ export const retryDeployment = async (req, res) => {
       return res.status(409).json({ message: `Only failed or cancelled deployments can be retried (current: ${deployment.status}).` });
     }
     const project = await requireOwnedProject(deployment.projectId, req.user?.id);
-    const target = targetFor(project);
+    const target = "AWS_ECS_FARGATE";
     const { blockers } = await preflight(project);
     if (blockers.length) return res.status(422).json({ message: "Deployment preflight failed", blockers });
 

@@ -1,17 +1,26 @@
+import { NGINX_SECURITY_LINES } from "./nginxSecurity.js";
+
 /**
- * Static HTML/CSS/JavaScript Dockerfile Generator
- * Serves static web assets with high-performance Alpine Nginx.
+ * Static HTML/CSS/JavaScript Dockerfile generator.
+ * Serves the directory that holds index.html (repository root, public/, docs/, ...) with Nginx.
  */
 export function generateStaticDockerfile(metadata = {}) {
-  const { port = 80 } = metadata;
+  const staticRoot = String(metadata.staticRoot || ".").replace(/^\.?\/*/, "") || ".";
+  const source = staticRoot === "." ? "." : `${staticRoot}/`;
 
   return `FROM nginx:alpine
 
-WORKDIR /usr/share/nginx/html
+RUN printf '%s\\n' 'server {' \\
+    '    listen 80;' \\
+    '    server_name _;' \\
+${NGINX_SECURITY_LINES}    '    root /usr/share/nginx/html;' \\
+    '    index index.html index.htm;' \\
+    '    location / { try_files $uri $uri/ $uri.html =404; }' \\
+    '}' > /etc/nginx/conf.d/default.conf
 
-COPY . .
+COPY ${source} /usr/share/nginx/html/
 
-EXPOSE ${port || 80}
+EXPOSE 80
 
 CMD ["nginx", "-g", "daemon off;"]
 `;

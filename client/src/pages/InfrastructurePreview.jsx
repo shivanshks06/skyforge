@@ -20,8 +20,6 @@ import {
   Sliders,
   Zap,
   Radio,
-  Database,
-  Users,
   CheckCheck,
   Rocket,
 } from "lucide-react";
@@ -29,7 +27,6 @@ import Card from "../components/Card";
 import Button from "../components/Button";
 import {
   getProjectInfrastructure,
-  updateProjectInfrastructureTarget,
 } from "../services/api";
 
 export default function InfrastructurePreview() {
@@ -37,7 +34,6 @@ export default function InfrastructurePreview() {
   const navigate = useNavigate();
 
   const [loading, setLoading] = useState(true);
-  const [switchingTarget, setSwitchingTarget] = useState(false);
   const [data, setData] = useState(null);
   const [activeTab, setActiveTab] = useState("main.tf");
   const [copied, setCopied] = useState(false);
@@ -84,30 +80,6 @@ export default function InfrastructurePreview() {
     };
   // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [id]);
-
-  const handleSwitchTarget = async (newTarget) => {
-    if (newTarget === data?.target || switchingTarget) return;
-    try {
-      setSwitchingTarget(true);
-      const res = await updateProjectInfrastructureTarget(id, newTarget);
-      setData((prev) => ({
-        ...prev,
-        ...res,
-      }));
-      if (res.files && Object.keys(res.files).length > 0) {
-        setActiveTab(Object.keys(res.files)[0]);
-      }
-      showNotification(
-        "success",
-        `Target successfully switched to ${res.displayName}`
-      );
-    } catch (err) {
-      console.error("Failed to switch target:", err);
-      showNotification("error", "Failed to switch infrastructure target.");
-    } finally {
-      setSwitchingTarget(false);
-    }
-  };
 
   const handleCopyCode = async () => {
     const code = getActiveFileContent();
@@ -169,7 +141,6 @@ export default function InfrastructurePreview() {
   const project = data.project || {};
   const cost = data?.costEstimation || {};
   const services = data?.services || [];
-  const target = data?.target || "AWS_ECS_FARGATE";
   const filesList = data?.files ? Object.keys(data.files) : [];
   const allTabs = [...filesList, "infrastructure.json"];
 
@@ -246,7 +217,6 @@ export default function InfrastructurePreview() {
             View Dockerfile
           </Button>
           <Button
-            disabled={switchingTarget}
             onClick={() => navigate(`/project/${id}/deploy`)}
             className="flex items-center gap-2 bg-[#9E5D2D] hover:bg-[#844C22] text-white shadow-sm"
           >
@@ -292,120 +262,23 @@ export default function InfrastructurePreview() {
         </div>
       </div>
 
-      {/* Target Architecture Switcher */}
-      <Card glow={false} className="bg-gradient-to-r from-[#FAF6F0] via-white to-[#FAF6F0] border border-[#EADFCF] flex flex-col gap-4">
-        <div className="flex items-center justify-between">
-          <div>
-            <h3 className="text-base font-bold text-[#362217]">Cloud Deployment Target</h3>
-            <p className="text-xs text-[#5E4C3E] mt-0.5">
-              Select your AWS deployment architecture. Terraform scripts will automatically re-synthesize.
-            </p>
+      {/* Deployment Target */}
+      <Card glow={false} className="bg-gradient-to-r from-[#FAF6F0] via-white to-[#FAF6F0] border border-[#EADFCF] flex flex-col gap-3">
+        <div className="flex items-start justify-between gap-4">
+          <div className="flex items-center gap-2.5">
+            <div className="p-2 rounded-xl bg-[#9E5D2D]/10 text-[#9E5D2D]">
+              <Server className="h-5 w-5" />
+            </div>
+            <div>
+              <h3 className="text-base font-bold text-[#362217]">Cloud Deployment Target: AWS ECS Fargate</h3>
+              <span className="text-[11px] text-[#8C7667]">Dedicated Container Architecture</span>
+            </div>
           </div>
-          <span className="text-xs font-semibold text-[#8C7667]">
-            Active Target: <span className="text-[#9E5D2D] font-bold">{data.displayName}</span>
-          </span>
+          <span className="text-xs font-bold text-[#362217] font-mono shrink-0">~$27 - $36/month</span>
         </div>
-
-        <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
-          {/* Target 1: ECS Fargate */}
-          <div
-            role="button"
-            tabIndex={0}
-            aria-pressed={target === "AWS_ECS_FARGATE"}
-            onKeyDown={(event) => {
-              if (event.key === "Enter" || event.key === " ") {
-                event.preventDefault();
-                void handleSwitchTarget("AWS_ECS_FARGATE");
-              }
-            }}
-            onClick={() => handleSwitchTarget("AWS_ECS_FARGATE")}
-            className={`p-4 rounded-2xl border-2 cursor-pointer transition-all flex flex-col justify-between gap-3 ${
-              target === "AWS_ECS_FARGATE"
-                ? "bg-white border-[#9E5D2D] shadow-sm ring-2 ring-[#9E5D2D]/20"
-                : "bg-white/60 border-[#EADFCF] hover:border-[#8C7667]"
-            }`}
-          >
-            <div className="flex items-start justify-between">
-              <div className="flex items-center gap-2.5">
-                <div className="p-2 rounded-xl bg-[#9E5D2D]/10 text-[#9E5D2D]">
-                  <Server className="h-5 w-5" />
-                </div>
-                <div>
-                  <h4 className="text-sm font-bold text-[#362217]">AWS ECS Fargate</h4>
-                  <span className="text-[11px] text-[#8C7667]">Dedicated Container Architecture</span>
-                </div>
-              </div>
-              <div
-                className={`w-5 h-5 rounded-full border-2 flex items-center justify-center shrink-0 ${
-                  target === "AWS_ECS_FARGATE"
-                    ? "border-[#9E5D2D] bg-[#9E5D2D] text-white"
-                    : "border-[#8C7667]"
-                }`}
-              >
-                {target === "AWS_ECS_FARGATE" && <Check className="h-3 w-3 stroke-[3]" />}
-              </div>
-            </div>
-            <p className="text-xs text-[#5E4C3E]">
-              Isolated VPC, Application Load Balancer, container auto-recovery, and CloudWatch logs. Best for APIs, Next.js SSR, and microservices.
-            </p>
-            <div className="flex items-center justify-between text-xs pt-1 border-t border-[#F0E7DC]">
-              <span className="font-semibold text-[#8C7667]">Starting at</span>
-              <span className="font-bold text-[#362217] font-mono">~$27 - $36/month</span>
-            </div>
-          </div>
-
-          {/* Target 2: S3 + CloudFront */}
-          <div
-            role="button"
-            tabIndex={0}
-            aria-pressed={target === "AWS_S3_CLOUDFRONT"}
-            onKeyDown={(event) => {
-              if (event.key === "Enter" || event.key === " ") {
-                event.preventDefault();
-                void handleSwitchTarget("AWS_S3_CLOUDFRONT");
-              }
-            }}
-            onClick={() => handleSwitchTarget("AWS_S3_CLOUDFRONT")}
-            className={`p-4 rounded-2xl border-2 cursor-pointer transition-all flex flex-col justify-between gap-3 ${
-              target === "AWS_S3_CLOUDFRONT"
-                ? "bg-white border-[#9E5D2D] shadow-sm ring-2 ring-[#9E5D2D]/20"
-                : "bg-white/60 border-[#EADFCF] hover:border-[#8C7667]"
-            }`}
-          >
-            <div className="flex items-start justify-between">
-              <div className="flex items-center gap-2.5">
-                <div className="p-2 rounded-xl bg-[#3B7A75]/10 text-[#3B7A75]">
-                  <Globe className="h-5 w-5" />
-                </div>
-                <div>
-                  <div className="flex items-center gap-2">
-                    <h4 className="text-sm font-bold text-[#362217]">AWS S3 + CloudFront CDN</h4>
-                    <span className="text-[10px] font-bold px-1.5 py-0.5 rounded bg-[#2E6B4F]/10 text-[#2E6B4F]">
-                      Ultra Low Cost
-                    </span>
-                  </div>
-                  <span className="text-[11px] text-[#8C7667]">Serverless Global Edge Distribution</span>
-                </div>
-              </div>
-              <div
-                className={`w-5 h-5 rounded-full border-2 flex items-center justify-center shrink-0 ${
-                  target === "AWS_S3_CLOUDFRONT"
-                    ? "border-[#9E5D2D] bg-[#9E5D2D] text-white"
-                    : "border-[#8C7667]"
-                }`}
-              >
-                {target === "AWS_S3_CLOUDFRONT" && <Check className="h-3 w-3 stroke-[3]" />}
-              </div>
-            </div>
-            <p className="text-xs text-[#5E4C3E]">
-              Origin Access Control (OAC), TLS 1.3 encryption, and sub-50ms edge caching. Best for React, Vite, Vue, and static frontends.
-            </p>
-            <div className="flex items-center justify-between text-xs pt-1 border-t border-[#F0E7DC]">
-              <span className="font-semibold text-[#8C7667]">Estimated</span>
-              <span className="font-bold text-[#2E6B4F] font-mono">~$1.50/month (Free Tier Eligible)</span>
-            </div>
-          </div>
-        </div>
+        <p className="text-xs text-[#5E4C3E]">
+          Application Load Balancer, container auto-recovery, and CloudWatch logs. SkyForge deploys every project, including static frontends, as a container on ECS Fargate.
+        </p>
       </Card>
 
       {/* Visual Architecture Topology Diagram */}
@@ -429,129 +302,74 @@ export default function InfrastructurePreview() {
 
         {/* Visual Topology Pipeline */}
         <div className="p-6 rounded-2xl bg-[#FAF8F5] border border-[#EADFCF] flex flex-col md:flex-row items-center justify-between gap-4 overflow-x-auto">
-          {target === "AWS_S3_CLOUDFRONT" ? (
-            <>
-              {/* Node 1 */}
-              <div className="flex flex-col items-center gap-2 p-3.5 rounded-2xl bg-white border border-[#EAE1D5] shadow-xs w-44 shrink-0 text-center">
-                <div className="p-2.5 rounded-xl bg-[#8C7667]/10 text-[#8C7667]">
-                  <Users className="h-5 w-5" />
-                </div>
-                <span className="text-xs font-bold text-[#362217]">Global Users</span>
-                <span className="text-[10px] text-[#8C7667]">HTTPS Web Clients</span>
+          <>
+            {/* Node 1 */}
+            <div className="flex flex-col items-center gap-2 p-3.5 rounded-2xl bg-white border border-[#EAE1D5] shadow-xs w-40 shrink-0 text-center">
+              <div className="p-2.5 rounded-xl bg-[#8C7667]/10 text-[#8C7667]">
+                <Globe className="h-5 w-5" />
               </div>
+              <span className="text-xs font-bold text-[#362217]">Internet Traffic</span>
+              <span className="text-[10px] text-[#8C7667]">Port 80 / 443</span>
+            </div>
 
-              <div className="flex flex-col items-center text-[#9E5D2D] font-bold text-[11px]">
-                <ArrowRight className="h-5 w-5" />
-                <span>DNS Query</span>
-              </div>
+            <div className="flex flex-col items-center text-[#9E5D2D] font-bold text-[11px]">
+              <ArrowRight className="h-5 w-5" />
+              <span>Public Ingress</span>
+            </div>
 
-              {/* Node 2 */}
-              <div className="flex flex-col items-center gap-2 p-3.5 rounded-2xl bg-white border border-[#EAE1D5] shadow-xs w-44 shrink-0 text-center">
-                <div className="p-2.5 rounded-xl bg-[#9E5D2D]/10 text-[#9E5D2D]">
-                  <Globe className="h-5 w-5" />
-                </div>
-                <span className="text-xs font-bold text-[#362217]">Route 53 / DNS</span>
-                <span className="text-[10px] text-[#8C7667]">Latency-based Alias</span>
+            {/* Node 2 */}
+            <div className="flex flex-col items-center gap-2 p-3.5 rounded-2xl bg-white border border-[#EAE1D5] shadow-xs w-44 shrink-0 text-center">
+              <div className="p-2.5 rounded-xl bg-[#3B7A75]/10 text-[#3B7A75]">
+                <Radio className="h-5 w-5" />
               </div>
+              <span className="text-xs font-bold text-[#362217]">VPC Gateway</span>
+              <span className="text-[10px] text-[#8C7667]">2 Public Subnets</span>
+            </div>
 
-              <div className="flex flex-col items-center text-[#9E5D2D] font-bold text-[11px]">
-                <ArrowRight className="h-5 w-5" />
-                <span>TLS Termination</span>
-              </div>
+            <div className="flex flex-col items-center text-[#9E5D2D] font-bold text-[11px]">
+              <ArrowRight className="h-5 w-5" />
+              <span>Health Check</span>
+            </div>
 
-              {/* Node 3 */}
-              <div className="flex flex-col items-center gap-2 p-3.5 rounded-2xl bg-white border-2 border-[#3B7A75] shadow-xs w-48 shrink-0 text-center">
-                <div className="p-2.5 rounded-xl bg-[#3B7A75]/10 text-[#3B7A75]">
-                  <Zap className="h-5 w-5" />
-                </div>
-                <span className="text-xs font-bold text-[#362217]">CloudFront CDN</span>
-                <span className="text-[10px] text-[#2E6B4F] font-semibold">Edge Caching + OAC</span>
+            {/* Node 3 */}
+            <div className="flex flex-col items-center gap-2 p-3.5 rounded-2xl bg-white border border-[#EAE1D5] shadow-xs w-44 shrink-0 text-center">
+              <div className="p-2.5 rounded-xl bg-[#9E5D2D]/10 text-[#9E5D2D]">
+                <Sliders className="h-5 w-5" />
               </div>
+              <span className="text-xs font-bold text-[#362217]">ALB Router</span>
+              <span className="text-[10px] text-[#8C7667]">Dynamic Routing</span>
+            </div>
 
-              <div className="flex flex-col items-center text-[#9E5D2D] font-bold text-[11px]">
-                <ArrowRight className="h-5 w-5" />
-                <span>Secure Read</span>
-              </div>
+            <div className="flex flex-col items-center text-[#9E5D2D] font-bold text-[11px]">
+              <ArrowRight className="h-5 w-5" />
+              <span>Container Port</span>
+            </div>
 
-              {/* Node 4 */}
-              <div className="flex flex-col items-center gap-2 p-3.5 rounded-2xl bg-white border border-[#EAE1D5] shadow-xs w-44 shrink-0 text-center">
-                <div className="p-2.5 rounded-xl bg-[#9E5D2D]/10 text-[#9E5D2D]">
-                  <Database className="h-5 w-5" />
-                </div>
-                <span className="text-xs font-bold text-[#362217]">S3 Static Bucket</span>
-                <span className="text-[10px] text-[#8C7667]">Private Origin Storage</span>
+            {/* Node 4 */}
+            <div className="flex flex-col items-center gap-2 p-3.5 rounded-2xl bg-white border-2 border-[#9E5D2D] shadow-xs w-48 shrink-0 text-center">
+              <div className="p-2.5 rounded-xl bg-[#9E5D2D]/10 text-[#9E5D2D]">
+                <Cpu className="h-5 w-5" />
               </div>
-            </>
-          ) : (
-            <>
-              {/* Node 1 */}
-              <div className="flex flex-col items-center gap-2 p-3.5 rounded-2xl bg-white border border-[#EAE1D5] shadow-xs w-40 shrink-0 text-center">
-                <div className="p-2.5 rounded-xl bg-[#8C7667]/10 text-[#8C7667]">
-                  <Globe className="h-5 w-5" />
-                </div>
-                <span className="text-xs font-bold text-[#362217]">Internet Traffic</span>
-                <span className="text-[10px] text-[#8C7667]">Port 80 / 443</span>
-              </div>
+              <span className="text-xs font-bold text-[#362217]">ECS Fargate Tasks</span>
+              <span className="text-[10px] text-[#2E6B4F] font-semibold">
+                {project.cpu || "0.5 vCPU"} / {project.memory || "1 GB"}
+              </span>
+            </div>
 
-              <div className="flex flex-col items-center text-[#9E5D2D] font-bold text-[11px]">
-                <ArrowRight className="h-5 w-5" />
-                <span>Public Ingress</span>
-              </div>
+            <div className="flex flex-col items-center text-[#9E5D2D] font-bold text-[11px]">
+              <ArrowRight className="h-5 w-5" />
+              <span>Logs</span>
+            </div>
 
-              {/* Node 2 */}
-              <div className="flex flex-col items-center gap-2 p-3.5 rounded-2xl bg-white border border-[#EAE1D5] shadow-xs w-44 shrink-0 text-center">
-                <div className="p-2.5 rounded-xl bg-[#3B7A75]/10 text-[#3B7A75]">
-                  <Radio className="h-5 w-5" />
-                </div>
-                <span className="text-xs font-bold text-[#362217]">VPC Gateway</span>
-                <span className="text-[10px] text-[#8C7667]">2 Public Subnets</span>
+            {/* Node 5 */}
+            <div className="flex flex-col items-center gap-2 p-3.5 rounded-2xl bg-white border border-[#EAE1D5] shadow-xs w-40 shrink-0 text-center">
+              <div className="p-2.5 rounded-xl bg-[#8C7667]/10 text-[#8C7667]">
+                <Activity className="h-5 w-5" />
               </div>
-
-              <div className="flex flex-col items-center text-[#9E5D2D] font-bold text-[11px]">
-                <ArrowRight className="h-5 w-5" />
-                <span>Health Check</span>
-              </div>
-
-              {/* Node 3 */}
-              <div className="flex flex-col items-center gap-2 p-3.5 rounded-2xl bg-white border border-[#EAE1D5] shadow-xs w-44 shrink-0 text-center">
-                <div className="p-2.5 rounded-xl bg-[#9E5D2D]/10 text-[#9E5D2D]">
-                  <Sliders className="h-5 w-5" />
-                </div>
-                <span className="text-xs font-bold text-[#362217]">ALB Router</span>
-                <span className="text-[10px] text-[#8C7667]">Dynamic Routing</span>
-              </div>
-
-              <div className="flex flex-col items-center text-[#9E5D2D] font-bold text-[11px]">
-                <ArrowRight className="h-5 w-5" />
-                <span>Container Port</span>
-              </div>
-
-              {/* Node 4 */}
-              <div className="flex flex-col items-center gap-2 p-3.5 rounded-2xl bg-white border-2 border-[#9E5D2D] shadow-xs w-48 shrink-0 text-center">
-                <div className="p-2.5 rounded-xl bg-[#9E5D2D]/10 text-[#9E5D2D]">
-                  <Cpu className="h-5 w-5" />
-                </div>
-                <span className="text-xs font-bold text-[#362217]">ECS Fargate Tasks</span>
-                <span className="text-[10px] text-[#2E6B4F] font-semibold">
-                  {project.cpu || "0.5 vCPU"} / {project.memory || "1 GB"}
-                </span>
-              </div>
-
-              <div className="flex flex-col items-center text-[#9E5D2D] font-bold text-[11px]">
-                <ArrowRight className="h-5 w-5" />
-                <span>Logs</span>
-              </div>
-
-              {/* Node 5 */}
-              <div className="flex flex-col items-center gap-2 p-3.5 rounded-2xl bg-white border border-[#EAE1D5] shadow-xs w-40 shrink-0 text-center">
-                <div className="p-2.5 rounded-xl bg-[#8C7667]/10 text-[#8C7667]">
-                  <Activity className="h-5 w-5" />
-                </div>
-                <span className="text-xs font-bold text-[#362217]">CloudWatch</span>
-                <span className="text-[10px] text-[#8C7667]">7-Day Stream</span>
-              </div>
-            </>
-          )}
+              <span className="text-xs font-bold text-[#362217]">CloudWatch</span>
+              <span className="text-[10px] text-[#8C7667]">7-Day Stream</span>
+            </div>
+          </>
         </div>
       </Card>
 
@@ -747,7 +565,6 @@ export default function InfrastructurePreview() {
             Configure Environment
           </Button>
           <Button
-            disabled={switchingTarget}
             onClick={() => navigate(`/project/${id}/deploy`)}
             className="bg-[#9E5D2D] hover:bg-[#844C22] text-white flex items-center gap-2 shadow-sm"
           >
