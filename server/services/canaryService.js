@@ -29,18 +29,19 @@ function client(credentials) {
   });
 }
 
-export const canaryUserName = (appName) => `${appName}-canary`.slice(0, 64);
+// "canary" keys live inside the container; "honey" keys are planted in decoy files for attackers.
+export const canaryUserName = (appName, purpose = "canary") => `${appName}-${purpose}`.slice(0, 64);
 const isMissing = (error) => error?.name === "NoSuchEntityException" || error?.name === "NoSuchEntity";
 
 /** Creates the canary user and a fresh key. Returns { userName, accessKeyId, secretAccessKey }. */
-export async function createCanary({ credentials, appName }) {
+export async function createCanary({ credentials, appName, purpose = "canary" }) {
   const iam = client(credentials);
-  const userName = canaryUserName(appName);
+  const userName = canaryUserName(appName, purpose);
   try {
     await iam.send(new GetUserCommand({ UserName: userName }));
   } catch (error) {
     if (!isMissing(error)) throw error;
-    await iam.send(new CreateUserCommand({ UserName: userName, Path: PATH, Tags: [{ Key: "skyforge:managed", Value: "true" }, { Key: "skyforge:purpose", Value: "canary" }] }));
+    await iam.send(new CreateUserCommand({ UserName: userName, Path: PATH, Tags: [{ Key: "skyforge:managed", Value: "true" }, { Key: "skyforge:purpose", Value: purpose }] }));
   }
   // Rotate: a user can hold at most two keys, and the old secret is not recoverable anyway.
   const existing = await iam.send(new ListAccessKeysCommand({ UserName: userName }));
@@ -64,9 +65,9 @@ export async function checkCanary({ credentials, accessKeyId }) {
 }
 
 /** Deletes the canary user and its keys; missing users count as deleted. */
-export async function deleteCanary({ credentials, appName, userName }) {
+export async function deleteCanary({ credentials, appName, userName, purpose = "canary" }) {
   const iam = client(credentials);
-  const name = userName || canaryUserName(appName);
+  const name = userName || canaryUserName(appName, purpose);
   try {
     const keys = await iam.send(new ListAccessKeysCommand({ UserName: name }));
     for (const key of keys.AccessKeyMetadata || []) {
@@ -78,9 +79,9 @@ export async function deleteCanary({ credentials, appName, userName }) {
   }
 }
 
-export async function canaryExists({ credentials, appName }) {
+export async function canaryExists({ credentials, appName, purpose = "canary" }) {
   try {
-    await client(credentials).send(new GetUserCommand({ UserName: canaryUserName(appName) }));
+    await client(credentials).send(new GetUserCommand({ UserName: canaryUserName(appName, purpose) }));
     return true;
   } catch (error) {
     if (isMissing(error)) return false;

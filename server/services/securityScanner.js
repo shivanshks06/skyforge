@@ -15,7 +15,7 @@ const lineOf = (content, index) => content.slice(0, index).split("\n").length;
 const finding = (props) => ({ severity: "medium", fixable: false, ...props, id: `${props.source}:${props.rule}:${props.location || props.path || ""}` });
 
 // Patterns whose literal value is itself the leak (provider-specific formats).
-const KEY_PATTERNS = [
+export const KEY_PATTERNS = [
   { rule: "aws-access-key", regex: /\b(AKIA|ASIA)[0-9A-Z]{16}\b/g, title: "AWS access key committed to the repository", severity: "critical" },
   { rule: "stripe-live-key", regex: /\b(sk|rk)_live_[0-9a-zA-Z]{20,}\b/g, title: "Stripe live secret key committed", severity: "critical" },
   { rule: "github-token", regex: /\bgh[pousr]_[A-Za-z0-9]{36,}\b/g, title: "GitHub token committed", severity: "critical" },
@@ -98,7 +98,7 @@ function dedupe(findings) {
  * Safe self-pentest of the project's own deployment. `scanToken` is sent as x-skyforge-scan so the
  * project's WAF lets the scanner through (the report describes the application itself).
  */
-export async function runSelfPentest(liveUrl, { scanToken, timeoutMs = 8000 } = {}) {
+export async function runSelfPentest(liveUrl, { scanToken, timeoutMs = 8000, decoyMarkers = [] } = {}) {
   const base = new URL(liveUrl);
   const findings = [];
   const add = (props) => findings.push(finding({ source: "pentest", ...props }));
@@ -134,9 +134,11 @@ export async function runSelfPentest(liveUrl, { scanToken, timeoutMs = 8000 } = 
     { path: "/server-status", test: (r) => r.status === 200 && /Apache Server Status/i.test(r.body), rule: "exposed-server-status", severity: "medium", title: "Apache server-status is public", detail: "Shows live requests, client IPs, and URLs." },
     { path: "/actuator/env", test: (r) => r.status === 200 && /propertySources|activeProfiles/.test(r.body), rule: "exposed-actuator", severity: "high", title: "Spring actuator /env is public", detail: "Leaks configuration and possibly secrets." },
   ];
+  // SkyForge's own decoy files (honey credentials) are bait, not leaks.
+  const isDecoy = (response) => decoyMarkers.some((marker) => marker && response.body.includes(marker));
   for (const check of exposures) {
     const response = await get(check.path);
-    if (response && check.test(response)) add({ rule: check.rule, severity: check.severity, location: check.path, title: check.title, detail: check.detail, fix: "Block the path and make sure the file is not deployed (check .dockerignore and static file settings)." });
+    if (response && check.test(response) && !isDecoy(response)) add({ rule: check.rule, severity: check.severity, location: check.path, title: check.title, detail: check.detail, fix: "Block the path and make sure the file is not deployed (check .dockerignore and static file settings)." });
   }
 
   const missing = await get(`/skyforge-scan-${Date.now().toString(36)}-not-found`);

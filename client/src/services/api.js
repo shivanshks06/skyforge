@@ -124,3 +124,16 @@ export const unbanProjectIp = async (id, ip) => (await api.post(`/projects/${id}
 export const createSecurityFixPullRequest = async (id, findingId) => (await api.post(`/projects/${id}/security/fix`, { findingId }, { timeout: 180_000 })).data;
 export const takeSiteOffline = async (id) => (await api.post(`/projects/${id}/site/offline`)).data;
 export const bringSiteOnline = async (id) => (await api.post(`/projects/${id}/site/online`)).data;
+
+// Alert channels (per user) and the security automation added on top of the tiers.
+export const getAlertSettings = async () => (await api.get("/alerts")).data;
+export const saveAlertSettings = async (settings) => (await api.put("/alerts", { settings })).data;
+export const sendTestAlert = async (channel) => (await api.post("/alerts/test", { channel }, { timeout: 60_000 })).data;
+export const saveSecuritySettings = async (id, settings) => (await api.post(`/projects/${id}/security/settings`, { settings }, { timeout: 180_000 })).data;
+export const resolveSecurityIncident = async (id, incidentId) => (await api.post(`/projects/${id}/security/incidents/${incidentId}/resolve`)).data;
+export const runSecurityChecksNow = async (id) => (await api.post(`/projects/${id}/security/checks`, {}, { timeout: 240_000 })).data;
+export const rotateAdminDoor = async (id) => (await api.post(`/projects/${id}/security/door/rotate`, {}, { timeout: 120_000 })).data;
+export const replayBlockedAttacks = async (id) => (await api.post(`/projects/${id}/security/replay`, {}, { timeout: 180_000 })).data;
+export const runRedTeamRehearsal = async (id) => (await api.post(`/projects/${id}/security/redteam`, {}, { timeout: 240_000 })).data;
+export const getBlastRadius = async (id) => (await api.get(`/projects/${id}/security/blast-radius`)).data;
+export const getCostEstimate = async (id) => (await api.get(`/projects/${id}/security/cost`, { timeout: 60_000 })).data;

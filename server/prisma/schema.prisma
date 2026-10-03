@@ -15,6 +15,7 @@ model User {
   github        GitHubAccount?
   projects      Project[]
   awsConnection AwsConnection?
+  alertSettings Json?
 }
 
 model GitHubAccount {
@@ -53,6 +54,7 @@ model Project {
   userId           String
   user             User         @relation(fields: [userId], references: [id])
   deployments      Deployment[]
+  securityEvents   SecurityEvent[]
 
   // Sprint 5 Planning & Blueprint fields
   cpu            String?
@@ -126,4 +128,36 @@ model Deployment {
 
   @@index([projectId, createdAt])
   @@index([projectId, status])
+}
+
+// Security incidents: what happened, what SkyForge did automatically, and who was alerted.
+model SecurityEvent {
+  id        String    @id @default(cuid())
+  projectId String
+  project   Project   @relation(fields: [projectId], references: [id], onDelete: Cascade)
+  kind      String
+  severity  String
+  title     String
+  summary   String?
+  detail    Json?
+  actions   Json?
+  alerts    Json?
+  dedupeKey String?
+  createdAt DateTime  @default(now())
+  resolvedAt DateTime?
+
+  @@index([projectId, createdAt])
+  @@index([projectId, dedupeKey])
+}
+
+// Herd immunity: attacker IPs seen by any SkyForge project, shared with every Protected project.
+model ThreatIntel {
+  ip         String   @id
+  hits       Int      @default(1)
+  projectIds String[]
+  reasons    String[]
+  firstSeen  DateTime @default(now())
+  lastSeen   DateTime @default(now())
+
+  @@index([lastSeen])
 }

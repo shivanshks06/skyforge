@@ -13,7 +13,10 @@ import {
   saveDockerFiles,
 } from "../controllers/dockerController.js";
 import { getInfrastructure, updateInfrastructureTarget } from "../controllers/infrastructureController.js";
-import { getSecurity, setSecurityTier, setUnderAttack, unbanIp, runSecurityScan, createSecurityFix, takeOffline, bringOnline } from "../controllers/securityController.js";
+import {
+  getSecurity, setSecurityTier, setUnderAttack, unbanIp, runSecurityScan, createSecurityFix, takeOffline, bringOnline,
+  updateSecuritySettings, getIncidents, resolveIncident, runChecksNow, rotateAdminDoor, replayAttacks, runRedTeamRehearsal, getBlastRadius, getCostEstimate,
+} from "../controllers/securityController.js";
 import protect from "../middleware/authMiddleware.js";
 import { rateLimit } from "../middleware/rateLimit.js";
 
@@ -70,6 +73,15 @@ router.post("/:id/security/scan", securityLimit, runSecurityScan);
 router.post("/:id/security/under-attack", securityLimit, setUnderAttack);
 router.post("/:id/security/unban", securityLimit, unbanIp);
 router.post("/:id/security/fix", securityLimit, createSecurityFix);
+router.post("/:id/security/settings", securityLimit, updateSecuritySettings);
+router.get("/:id/security/incidents", getIncidents);
+router.post("/:id/security/incidents/:incidentId/resolve", securityLimit, resolveIncident);
+router.post("/:id/security/checks", securityLimit, runChecksNow);
+router.post("/:id/security/door/rotate", securityLimit, rotateAdminDoor);
+router.post("/:id/security/replay", securityLimit, replayAttacks);
+router.post("/:id/security/redteam", securityLimit, runRedTeamRehearsal);
+router.get("/:id/security/blast-radius", getBlastRadius);
+router.get("/:id/security/cost", getCostEstimate);
 router.post("/:id/site/offline", securityLimit, takeOffline);
 router.post("/:id/site/online", securityLimit, bringOnline);
 
