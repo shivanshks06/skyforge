@@ -92,6 +92,12 @@ const STAGES = [
   { id: "COMPLETE", label: "Live", desc: "Production traffic active" },
 ];
 
+const TARGET_LABELS = {
+  AWS_ECS_FARGATE: "AWS ECS Fargate",
+  AWS_ECS_CLOUDFRONT: "AWS ECS Fargate + CloudFront",
+  AWS_S3_CLOUDFRONT: "AWS S3 + CloudFront",
+};
+
 export default function DeploymentConsole() {
   const { id } = useParams();
   const [searchParams] = useSearchParams();
@@ -582,7 +588,7 @@ export default function DeploymentConsole() {
             </span>
 
             <span className="text-xs px-2.5 py-1 rounded-full bg-[#362217] text-[#FAF6F0] font-semibold">
-              Target: {project?.deploymentTarget || "AWS ECS Fargate"}
+              Target: {TARGET_LABELS[project?.deploymentTarget] || "not chosen yet"}
             </span>
           </div>
 
@@ -652,6 +658,14 @@ export default function DeploymentConsole() {
             >
               <RotateCcw className="h-4 w-4" />
               Retry Deployment
+            </Button>
+          ) : !project?.deploymentTarget ? (
+            <Button
+              onClick={() => navigate(`/project/${id}/infrastructure`)}
+              className="bg-[#9E5D2D] hover:bg-[#844C22] text-white flex items-center gap-2 shadow-sm font-bold"
+            >
+              <Rocket className="h-4 w-4" />
+              Choose a deployment target
             </Button>
           ) : (
             <Button

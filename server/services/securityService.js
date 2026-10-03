@@ -52,7 +52,7 @@ export async function prepareCanary({ project, credentials, log }) {
  * Brings the firewall in line with the project's tier for the given live resources.
  * Returns the resource keys to record on the deployment (so teardown deletes them).
  */
-export async function applyProtection({ project, credentials, resources, sourceFiles = [], underAttack, log }) {
+export async function applyProtection({ project, credentials, resources, sourceFiles = [], underAttack, log, target }) {
   const protection = project.protection || {};
   const appName = resourceNames(project).appName;
   if (project.securityTier !== "PROTECTED") {
@@ -63,7 +63,13 @@ export async function applyProtection({ project, credentials, resources, sourceF
     }
     return { webAclArn: null, webAclId: null, ipSetId: null, webAclName: null, ipSetName: null };
   }
-  if (!resources?.loadBalancerArn) throw new Error("The site has no load balancer yet; deploy it first.");
+  if (!resources?.loadBalancerArn) {
+    if (resources?.bucket || target === "AWS_S3_CLOUDFRONT") {
+      log?.("[SECURITY] The Protected-tier firewall for S3 + CloudFront sites is not available yet; free-tier protections apply.", "warn");
+      return { webAclArn: null, webAclId: null, ipSetId: null, webAclName: null, ipSetName: null };
+    }
+    throw new Error("The site has no load balancer yet; deploy it first.");
+  }
   const routes = sourceFiles.length ? extractRoutes(sourceFiles) : protection.waf?.routes || [];
   const scanToken = ensureScanToken(protection);
   const waf = await ensureWebAcl({
@@ -74,6 +80,7 @@ export async function applyProtection({ project, credentials, resources, sourceF
     tripwirePaths: tripwirePathsFor({ framework: project.framework, sourceRoutes: routes }),
     loginPaths: routes.filter((route) => LOGIN_ROUTE.test(route)).slice(0, 20),
     underAttack: underAttack ?? Boolean(protection.waf?.underAttack),
+    forwardedIp: Boolean(resources.edgeDistributionId),
   });
   await saveProtection(project.id, { ...protection, scanToken, waf: { ...waf, routes: routes.slice(0, 200) }, bans: protection.bans || [] });
   log?.(`[SECURITY] Firewall active: OWASP + IP reputation + known-bad-input rules, rate limits${waf.underAttack ? " (UNDER ATTACK mode)" : ""}, ${waf.tripwirePaths.length} tripwires, ${waf.loginPaths.length} login route(s) found in the source.`);

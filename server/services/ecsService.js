@@ -953,10 +953,14 @@ export async function destroyEcsResources({ credentials, resources, deploymentId
   }
 
   if (resources.serviceName && resources.clusterName) {
-    await verifyResourceAbsent(async () => {
-      const s = await describeService(ecs, resources.clusterName, resources.serviceName);
-      return Boolean(s && s.status !== "INACTIVE");
-    }, `ECS service ${resources.serviceName}`);
+    // A deleted service stays DRAINING until its tasks stop and deregister, which can take minutes.
+    const deadline = Date.now() + 10 * 60_000;
+    for (;;) {
+      const s = await describeService(ecs, resources.clusterName, resources.serviceName).catch((error) => (isMissingResourceError(error) ? null : Promise.reject(error)));
+      if (!s || s.status === "INACTIVE") break;
+      if (Date.now() > deadline) throw new Error(`ECS service ${resources.serviceName} still exists after deletion.`);
+      await sleep(10_000);
+    }
   }
   if (resources.clusterName) {
     await verifyResourceAbsent(async () => {

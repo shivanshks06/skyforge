@@ -1,10 +1,58 @@
 /**
  * AWS Cost Estimator Service (Sprint 7)
- * Computes transparent, itemized monthly infrastructure cost estimates for ECS Fargate deployments.
+ * Computes transparent, itemized monthly infrastructure cost estimates for ECS Fargate and S3+CloudFront deployments.
  */
 
 export function estimateInfrastructureCost(target, specs = {}) {
   const { cpu = "0.5 vCPU", memory = "1 GB" } = specs;
+
+  if (target === "AWS_S3_CLOUDFRONT") {
+    const breakdown = [
+      {
+        resource: "Amazon S3 Static Bucket (5 GB storage)",
+        rate: "$0.023 / GB-month",
+        monthlyCost: 0.12,
+        formattedMonthly: "$0.12",
+        category: "Storage",
+        notes: "First 5 GB covered in standard AWS free tier.",
+      },
+      {
+        resource: "Amazon CloudFront Global CDN",
+        rate: "$0.0085 / 10k requests",
+        monthlyCost: 0.88,
+        formattedMonthly: "$0.88",
+        category: "Content Delivery",
+        notes: "First 1 TB/month transfer out is 100% free forever.",
+      },
+      {
+        resource: "Amazon Route 53 Hosted Zone",
+        rate: "$0.50 / hosted zone",
+        monthlyCost: 0.50,
+        formattedMonthly: "$0.50",
+        category: "DNS",
+        notes: "Optional DNS alias for custom domains.",
+      },
+      {
+        resource: "AWS Certificate Manager (SSL)",
+        rate: "Free",
+        monthlyCost: 0.00,
+        formattedMonthly: "$0.00",
+        category: "Security",
+        notes: "Automated public wildcard certificates are free.",
+      },
+    ];
+
+    const numericTotal = 1.50;
+
+    return {
+      total: "$1.50/month",
+      numericTotal,
+      currency: "USD",
+      isFreeTierEligible: true,
+      billingFrequency: "Monthly Estimate",
+      breakdown,
+    };
+  }
 
   // Target: ECS Fargate
   const cpuMap = {
@@ -64,6 +112,16 @@ export function estimateInfrastructureCost(target, specs = {}) {
     },
   ];
 
+  if (target === "AWS_ECS_CLOUDFRONT") {
+    breakdown.push({
+      resource: "Amazon CloudFront HTTPS edge",
+      rate: "$0.0085 / 10k HTTPS requests after free tier",
+      monthlyCost: 0,
+      formattedMonthly: "$0.00",
+      category: "Content Delivery",
+      notes: "Always-free tier covers 1 TB transfer and 10M requests per month.",
+    });
+  }
   return {
     total: `$${total}/month`,
     numericTotal: parseFloat(total),

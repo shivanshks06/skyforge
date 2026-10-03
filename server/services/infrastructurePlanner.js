@@ -1,26 +1,68 @@
-/**
- * Infrastructure Planner Service (Sprint 7)
- * Implements a deterministic AWS Decision Matrix to select optimal infrastructure targets,
- * assemble service topologies, and produce visual architecture graph metadata.
- */
-
-export const AWS_TARGETS = {
-  ECS_FARGATE: "AWS_ECS_FARGATE",
-};
+import { TARGETS, normalizeTarget } from "./targets.js";
 
 /**
- * Every project deploys to ECS Fargate; static frontends ship as nginx containers.
+ * Infrastructure Planner: service topology and architecture graph for the target the project
+ * owner chose. It never picks a target on its own.
  */
-export function determineDeploymentTarget() {
-  return AWS_TARGETS.ECS_FARGATE;
+
+export const AWS_TARGETS = TARGETS;
+
+/** The explicitly chosen target, or null when the owner has not chosen one yet. */
+export function determineDeploymentTarget(project = {}) {
+  return normalizeTarget(project.deploymentTarget);
 }
 
 /**
  * Plan complete cloud infrastructure topology
  */
-export function planInfrastructure(project = {}) {
+export function planInfrastructure(project = {}, customTarget = null) {
+  const target = normalizeTarget(customTarget) || determineDeploymentTarget(project);
+  if (!target) return null;
   const appName = (project.name || "skyforge-app").toLowerCase().replace(/[^a-z0-9-]/g, "-");
   const port = project.port || 80;
+
+  if (target === AWS_TARGETS.S3_CLOUDFRONT) {
+    const services = [
+      {
+        id: "s3",
+        name: "Amazon S3 Bucket",
+        category: "Storage",
+        description: "Static asset origin bucket with SSE-S3 encryption and blocked public access.",
+        status: "Configured",
+        specs: "Private, OAC Restricted, 30-day release retention",
+      },
+      {
+        id: "cloudfront",
+        name: "Amazon CloudFront CDN",
+        category: "Content Delivery",
+        description: "Global low-latency edge distribution with HTTPS termination and SPA routing.",
+        status: "Configured",
+        specs: "Global Edge Network, TLS 1.3",
+      },
+
+    ];
+
+    const architectureGraph = {
+      nodes: [
+        { id: "clients", label: "Global Users", type: "client", icon: "Users" },
+        { id: "cloudfront", label: "CloudFront CDN Edge", type: "cdn", icon: "Zap" },
+        { id: "s3", label: "Private S3 Origin", type: "storage", icon: "Database" },
+      ],
+      connections: [
+        { from: "clients", to: "cloudfront", label: "HTTPS Request" },
+        { from: "cloudfront", to: "s3", label: "Origin Access Control (OAC)" },
+      ],
+    };
+
+    return {
+      target: AWS_TARGETS.S3_CLOUDFRONT,
+      displayName: "AWS S3 + CloudFront CDN",
+      strategyDescription: "Private serverless static hosting with CloudFront edge delivery, managed TLS, and no origin compute when idle.",
+      services,
+      architectureGraph,
+      requiredModules: ["main.tf", "variables.tf", "outputs.tf", "s3.tf", "cloudfront.tf"],
+    };
+  }
 
   // Target: ECS Fargate
   const services = [
@@ -84,9 +126,23 @@ export function planInfrastructure(project = {}) {
     ],
   };
 
+  if (target === AWS_TARGETS.ECS_CLOUDFRONT) {
+    services.unshift({
+      id: "cloudfront",
+      name: "Amazon CloudFront (HTTPS edge)",
+      category: "Content Delivery",
+      description: "Free HTTPS on a *.cloudfront.net address in front of the load balancer; forwards every method, header, and cookie with no caching.",
+      status: "Configured",
+      specs: "TLS 1.2+, HTTP/2 and HTTP/3, falls back to the ALB address until CloudFront is enabled for the account",
+    });
+    architectureGraph.nodes.splice(1, 0, { id: "cloudfront", label: "CloudFront HTTPS Edge", type: "cdn", icon: "Zap" });
+    architectureGraph.connections[0] = { from: "clients", to: "cloudfront", label: "HTTPS" };
+    architectureGraph.connections.splice(1, 0, { from: "cloudfront", to: "igw", label: "HTTP to origin" });
+  }
+
   return {
-    target: AWS_TARGETS.ECS_FARGATE,
-    displayName: "AWS ECS Fargate",
+    target,
+    displayName: target === AWS_TARGETS.ECS_CLOUDFRONT ? "AWS ECS Fargate + CloudFront" : "AWS ECS Fargate",
     strategyDescription: "Serverless container architecture using validated existing network subnets, a health-checked load balancer, and least-privilege IAM.",
     services,
     architectureGraph,

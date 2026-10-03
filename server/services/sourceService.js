@@ -388,3 +388,51 @@ export async function buildContainerImage(project, deploymentId, sourceDir, imag
   }
   throw lastError;
 }
+
+const STATIC_KIND = /\(SPA\)|^Frontend SPA$|^Static HTML$|^Jekyll$/;
+
+/**
+ * Builds a static site for S3 hosting: the same planner and Docker build as container deployments,
+ * then the finished files are copied out of the nginx image. Returns the output directory.
+ * Throws a clear error when the app needs a server (choose an ECS target instead).
+ */
+export async function buildStaticSite(project, deploymentId, sourceDir) {
+  const plan = planBuild(sourceDir);
+  if (plan.strategy !== "generated" || !STATIC_KIND.test(plan.metadata.framework)) {
+    const kind = plan.metadata?.framework || "an app with its own Dockerfile";
+    throw new Error(`S3 + CloudFront hosts static sites only, but this repository is ${kind}, which needs a server. Choose "ECS Fargate" or "ECS Fargate + CloudFront" on the Infrastructure page.`);
+  }
+  emitDeploymentLog(deploymentId, { stage: "BUILDING", message: `[BUILD] Detected ${plan.summary}; building static files for S3.`, level: "info" });
+  const outputDir = path.join(safeDeploymentDirectory(project.id, deploymentId), "dist");
+  await fs.rm(outputDir, { recursive: true, force: true });
+  await fs.mkdir(outputDir, { recursive: true });
+
+  const dockerfilePath = path.join(safeProjectDirectory(project.id), "Dockerfile.static");
+  const publicBuildEnv = Object.entries(decryptObjectValues(project.envConfig || {}))
+    .filter(([key]) => /^(?:VITE_|NEXT_PUBLIC_|PUBLIC_|REACT_APP_|NUXT_PUBLIC_|GATSBY_)/.test(key));
+  const lines = generateDockerfile({ ...plan.metadata, id: project.id }).split("\n");
+  const firstFrom = lines.findIndex((line) => /^FROM\s/i.test(line.trim()));
+  lines.splice(firstFrom + 1, 0, ...publicBuildEnv.flatMap(([key]) => [`ARG ${key}`, `ENV ${key}=$${key}`]));
+  await fs.mkdir(path.dirname(dockerfilePath), { recursive: true });
+  await fs.writeFile(dockerfilePath, lines.join("\n"), "utf-8");
+
+  const imageTag = `skyforge-static-${String(deploymentId).toLowerCase().replace(/[^a-z0-9-]/g, "")}`;
+  const container = `${imageTag}-extract`;
+  await dockerBuild({
+    contextDir: plan.appRoot,
+    dockerfilePath,
+    imageTag,
+    buildArgs: publicBuildEnv.flatMap(([key, value]) => ["--build-arg", `${key}=${String(value)}`]),
+    deploymentId,
+  });
+  try {
+    await runCommand("docker", ["create", "--name", container, imageTag], { timeout: 60_000 });
+    await runCommand("docker", ["cp", `${container}:/usr/share/nginx/html/.`, outputDir], { timeout: 300_000 });
+  } finally {
+    await runCommand("docker", ["rm", "-f", container], { timeout: 60_000 }).catch(() => {});
+    await runCommand("docker", ["rmi", "-f", imageTag], { timeout: 60_000 }).catch(() => {});
+  }
+  await fs.rm(path.join(outputDir, "50x.html"), { force: true });
+  if (!fsSync.existsSync(path.join(outputDir, "index.html"))) throw new Error("The static build produced no index.html.");
+  return outputDir;
+}

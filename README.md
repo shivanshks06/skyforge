@@ -1,14 +1,14 @@
 # SkyForge
 
-SkyForge deploys web applications from a GitHub repository to **your own AWS account** on Amazon ECS Fargate. It also scans and protects them, and deletes everything cleanly when you are done.
+SkyForge deploys web applications from a GitHub repository to **your own AWS account**. You choose the target for each project: ECS Fargate, ECS Fargate behind CloudFront, or S3 + CloudFront for static sites. It also scans and protects them, and deletes everything cleanly when you are done.
 
-You connect GitHub and AWS, pick a repository, and press **Deploy**. SkyForge then:
+You connect GitHub and AWS, pick a repository, choose a deployment target, and press **Deploy**. SkyForge then:
 
 1. downloads the source;
 2. works out what kind of app it is (language, framework, version, entry point, port);
 3. checks the environment variables and services the app needs;
 4. builds a production container image and pushes it to Amazon ECR;
-5. runs it on ECS Fargate behind an Application Load Balancer;
+5. runs it on the chosen target: ECS Fargate behind an Application Load Balancer (optionally with CloudFront in front), or S3 + CloudFront for static sites;
 6. waits for a real HTTP health check before calling it **LIVE**;
 7. scans the live site for security problems and, if you choose, puts an AWS WAF firewall in front of it.
 
@@ -19,6 +19,7 @@ You connect GitHub and AWS, pick a repository, and press **Deploy**. SkyForge th
 ## Contents
 
 - [Feature overview](#feature-overview)
+- [Deployment targets](#deployment-targets)
 - [Architecture](#architecture)
 - [Supported stacks](#supported-stacks)
 - [How a deployment works](#how-a-deployment-works)
@@ -46,7 +47,8 @@ You connect GitHub and AWS, pick a repository, and press **Deploy**. SkyForge th
 |---|---|
 | **Repository analysis** | Reads the GitHub repository, detects the framework and language, and suggests CPU and memory with an AI planner (Gemini, optional). |
 | **Build planner** | Re-detects the app from the checked-out code at build time and generates a production Dockerfile for 15+ stacks. It falls back to the repository's own Dockerfile if the generated build fails. |
-| **Deployment** | Builds with Docker, pushes to ECR by immutable digest, and runs on ECS Fargate behind an ALB with a rolling update. |
+| **Deployment targets** | Three explicit choices, none preselected: ECS Fargate, ECS Fargate + CloudFront, and S3 + CloudFront (static sites). Deployment is blocked until you pick one. |
+| **Deployment** | Builds with Docker, pushes to ECR by immutable digest, and runs on ECS Fargate behind an ALB with a rolling update, or builds static files and uploads them to S3. |
 | **Environment checks** | Scans the whole source tree for the environment variables the app reads and the databases or caches it needs. Deployment is blocked until required values are set. |
 | **Security scanning** | Static code scan, a safe self-pentest of the live site, and a container image CVE scan, combined into a score from 0 to 100 and a grade from A to F. |
 | **AI fix pull requests** | One click turns a finding (such as `DEBUG = True` or a hard-coded secret) into a commit and pull request on GitHub. |
@@ -55,6 +57,25 @@ You connect GitHub and AWS, pick a repository, and press **Deploy**. SkyForge th
 | **Site availability** | Take a site offline (maintenance page, container stopped) and bring it back without redeploying. |
 | **Verified teardown** | Deletes every project resource, then sweeps AWS by name and only succeeds once nothing remains. |
 | **Monitoring** | Health checks every minute, ban-list sync, canary checks, and automatic recovery after worker restarts. |
+
+---
+
+## Deployment targets
+
+A new project has **no target**. Open **Infrastructure** and pick one of these. Deploy stays disabled until you do.
+
+| Target | Runs | HTTPS | Suits |
+|---|---|---|---|
+| **ECS Fargate** | Container on Fargate behind an ALB | No (HTTP on the ALB address) | Any app |
+| **ECS Fargate + CloudFront** | Same, with a CloudFront distribution in front of the ALB | Yes, on the `cloudfront.net` address | Any app |
+| **S3 + CloudFront** | Static build output in a private S3 bucket served by CloudFront (Origin Access Control, AWS security headers policy) | Yes | Static sites and SPAs only |
+
+- You can switch between the two ECS targets at any time. Switching between the ECS and S3 families requires destroying the live deployment first.
+- **S3 + CloudFront** builds the app with the generated Dockerfile and copies the files out of the image, so the same detection works (React, Vue, Angular, Vite, plain HTML and similar). Server apps are rejected for this target.
+- **CloudFront not enabled on your account?** New AWS accounts can be refused with "Your account must be verified before you can add new CloudFront resources". SkyForge then falls back automatically and tells you so: ECS + CloudFront serves the ALB address over HTTP, and S3 + CloudFront uses S3 static website hosting over HTTP. Once AWS enables CloudFront, redeploy to get HTTPS.
+- Behind CloudFront, the WAF reads the visitor IP from `X-Forwarded-For`, so bans and rate limits apply to the real client rather than CloudFront's edge.
+- Take-offline works on every target. For S3 sites it switches CloudFront to a maintenance page (or swaps the bucket root in website mode).
+- Destroy removes the bucket, distribution and Origin Access Control as well, and the verification sweep checks for them.
 
 ---
 
@@ -74,7 +95,7 @@ You connect GitHub and AWS, pick a repository, and press **Deploy**. SkyForge th
             └─ destroy worker     delete recorded resources → verified sweep
                 │
                 ▼ your AWS account (assumed role or access keys)
-          ECR · ECS Fargate · ALB · Security Groups · IAM · CloudWatch Logs · Secrets Manager · WAF
+          ECR · ECS Fargate · ALB · Security Groups · IAM · CloudWatch Logs · Secrets Manager · WAF · S3 · CloudFront
 ```
 
 - **client/**: React 19 single-page app (Vite, Tailwind CSS 4).
@@ -457,7 +478,7 @@ All server settings live in `server/.env`, which is loaded by `server/config/env
 | `ALLOW_CUSTOM_HEALTH_HOSTS` | Allow health probes to non-AWS hosts (development) |
 | `BUILD_TIMEOUT_MS`, `PUSH_TIMEOUT_MS` | Docker build and push time limits |
 | `ECS_WAIT_SECONDS` | Maximum time to wait for a rollout (default 900) |
-| `DESTROY_VERIFY_ATTEMPTS`, `CLOUDFRONT_WAIT_SECONDS` | Teardown verification (CloudFront applies to legacy static releases only) |
+| `DESTROY_VERIFY_ATTEMPTS`, `CLOUDFRONT_WAIT_SECONDS` | Teardown verification and how long to wait for CloudFront distributions to disable |
 | `DEPLOYMENT_WORKER_CONCURRENCY` | Parallel deployments per worker |
 | `TRUST_PROXY`, `SERVE_CLIENT`, `LOG_REDIS_ERRORS` | Reverse-proxy trust, serving `client/dist` from the API, Redis error logging |
 
@@ -548,7 +569,9 @@ CI installs from both lockfiles, applies migrations to an empty PostgreSQL datab
 
 ## Limitations
 
-- **HTTPS.** Sites are served over HTTP on the ALB address. Free automatic HTTPS needs CloudFront, which some new AWS accounts must ask AWS Support to enable. Until then, use a custom domain with an ACM certificate. The security report flags HTTP-only sites.
+- **HTTPS.** The plain ECS Fargate target serves HTTP on the ALB address. The CloudFront targets give free HTTPS, but some new AWS accounts must ask AWS Support to enable CloudFront; until then they fall back to HTTP. The security report flags HTTP-only sites.
+- **WAF on S3 sites.** The Protected tier attaches a regional WAF to the ALB, so it does not yet cover S3 + CloudFront sites (a CloudFront-scope WAF is planned).
+- **SPA deep links in S3 website mode** return status 404 while still serving the app, because S3 website hosting uses the error document. With CloudFront enabled they return 200.
 - **Databases are not provisioned.** SkyForge detects them and tells you what to set; you supply a hosted instance.
 - **Pattern-based detection.** Unusual setups can be missed, such as variables built at runtime or custom config loaders. The deploy-time check, the **Not needed** option, and Custom Dockerfiles cover the gaps.
 - **Not every repository can deploy.** Repositories with broken code, that need services at build time (for example `sqlx` compile-time queries), or that are not web servers will fail with a clear reason.

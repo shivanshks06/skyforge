@@ -5,6 +5,9 @@ import { getAwsCredentials } from "../services/awsConnectionService.js";
 import { decryptSecret } from "../services/secretService.js";
 import { fetchGitHubSourceFiles } from "../services/envScanner.js";
 import { takeSiteOffline, startSiteTasks } from "../services/ecsService.js";
+import { takeStaticSiteOffline, bringStaticSiteOnline } from "../services/staticDeployer.js";
+
+const isStatic = (resources) => /^S3_/.test(resources?.type || "");
 import { SECURITY_TIERS, applyProtection, buildSecurityReport, firewallSummary, syncProjectSecurity } from "../services/securityService.js";
 import { createFixPullRequest } from "../services/fixPullRequest.js";
 import { addMonitorJob } from "../queues/monitorQueue.js";
@@ -21,7 +24,7 @@ async function liveDeployment(projectId) {
     take: 5,
     select: { id: true, liveUrl: true, resources: true },
   });
-  return deployments.find((deployment) => deployment.resources?.loadBalancerArn) || null;
+  return deployments.find((deployment) => deployment.resources?.loadBalancerArn || deployment.resources?.bucket) || null;
 }
 
 async function githubToken(userId) {
@@ -183,7 +186,13 @@ export const takeOffline = async (req, res) => {
     const live = await liveDeployment(project.id);
     if (!live) return res.status(409).json({ message: "The site is not live." });
     if (project.siteOffline) return res.json({ message: "The site is already offline." });
-    await takeSiteOffline({ credentials: await credentialsFor(project), resources: live.resources });
+    const credentials = await credentialsFor(project);
+    if (isStatic(live.resources)) {
+      await takeStaticSiteOffline({ credentials, resources: live.resources });
+      await prisma.project.update({ where: { id: project.id }, data: { siteOffline: true, status: "Offline" } });
+      return res.json({ message: live.resources.type === "S3_CLOUDFRONT" ? "The site will show a maintenance page within a few minutes (CloudFront propagation). Static hosting costs almost nothing while offline." : "The site now shows a maintenance page. Static hosting costs almost nothing while offline." });
+    }
+    await takeSiteOffline({ credentials, resources: live.resources });
     await prisma.project.update({ where: { id: project.id }, data: { siteOffline: true, status: "Offline", protection: { ...(project.protection || {}), resuming: false } } });
     return res.json({ message: "The site now shows a maintenance page and the container is stopped. The load balancer still bills (about $0.55/day); destroy the project to stop all charges." });
   } catch (error) {
@@ -198,6 +207,11 @@ export const bringOnline = async (req, res) => {
     const live = await liveDeployment(project.id);
     if (!live) return res.status(409).json({ message: "The site is not live; deploy it instead." });
     if (!project.siteOffline) return res.json({ message: "The site is already online." });
+    if (isStatic(live.resources)) {
+      await bringStaticSiteOnline({ credentials: await credentialsFor(project), resources: live.resources });
+      await prisma.project.update({ where: { id: project.id }, data: { siteOffline: false, status: "Live" } });
+      return res.json({ message: live.resources.type === "S3_CLOUDFRONT" ? "The site is restored; CloudFront propagates the change within a few minutes." : "The site is back online." });
+    }
     await startSiteTasks({ credentials: await credentialsFor(project), resources: live.resources });
     await prisma.project.update({ where: { id: project.id }, data: { siteOffline: false, status: "Starting", protection: { ...(project.protection || {}), resuming: true } } });
     // The monitor finishes the switch back once the container is healthy; make sure it is running.
