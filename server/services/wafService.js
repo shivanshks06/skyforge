@@ -99,7 +99,11 @@ export function tripwirePathsFor({ framework = "", sourceRoutes = [] } = {}) {
   });
 }
 
-export function buildWafRules({ appName, scanToken, ipSetArn, tripwirePaths = TRIPWIRE_PATHS, loginPaths = [], underAttack = false }) {
+// Behind CloudFront every request reaches the ALB from an edge IP; the visitor is the first X-Forwarded-For entry.
+const FORWARDED = { HeaderName: "X-Forwarded-For", FallbackBehavior: "MATCH" };
+
+export function buildWafRules({ appName, scanToken, ipSetArn, tripwirePaths = TRIPWIRE_PATHS, loginPaths = [], underAttack = false, forwardedIp = false }) {
+  const rateKey = forwardedIp ? { AggregateKeyType: "FORWARDED_IP", ForwardedIPConfig: FORWARDED } : { AggregateKeyType: "IP" };
   const { metricPrefix } = wafNames(appName);
   const limits = underAttack ? LIMITS.underAttack : LIMITS.normal;
   const loginAlternatives = [...new Set([...LOGIN_KEYWORDS, ...loginPaths.map((route) => String(route).toLowerCase().replace(/^\/+|\/+$/g, "")).filter((route) => route.length > 2)])]
@@ -125,7 +129,7 @@ export function buildWafRules({ appName, scanToken, ipSetArn, tripwirePaths = TR
   rules.push({
     Name: "banned-ips",
     Priority: priority++,
-    Statement: { IPSetReferenceStatement: { ARN: ipSetArn } },
+    Statement: { IPSetReferenceStatement: { ARN: ipSetArn, ...(forwardedIp ? { IPSetForwardedIPConfig: { ...FORWARDED, Position: "FIRST" } } : {}) } },
     Action: { Block: {} },
     VisibilityConfig: visibility(`${metricPrefix}-banned`),
   });
@@ -145,7 +149,7 @@ export function buildWafRules({ appName, scanToken, ipSetArn, tripwirePaths = TR
       RateBasedStatement: {
         Limit: limits.login,
         EvaluationWindowSec: 300,
-        AggregateKeyType: "IP",
+        ...rateKey,
         ScopeDownStatement: anyOf(regexChunks("", loginAlternatives, "").map((regex) => uriRegex(regex, true))),
       },
     },
@@ -155,7 +159,7 @@ export function buildWafRules({ appName, scanToken, ipSetArn, tripwirePaths = TR
   rules.push({
     Name: "global-rate-limit",
     Priority: priority++,
-    Statement: { RateBasedStatement: { Limit: limits.global, EvaluationWindowSec: 300, AggregateKeyType: "IP" } },
+    Statement: { RateBasedStatement: { Limit: limits.global, EvaluationWindowSec: 300, ...rateKey } },
     Action: { Block: {} },
     VisibilityConfig: visibility(`${metricPrefix}-global-rate`),
   });
@@ -200,7 +204,7 @@ async function findByName(waf, Command, listKey, name) {
 }
 
 /** Creates or updates the project's web ACL and attaches it to the load balancer (idempotent). */
-export async function ensureWebAcl({ credentials, appName, loadBalancerArn, scanToken, tripwirePaths, loginPaths, underAttack = false }) {
+export async function ensureWebAcl({ credentials, appName, loadBalancerArn, scanToken, tripwirePaths, loginPaths, underAttack = false, forwardedIp = false }) {
   const waf = client(credentials);
   const { webAclName, ipSetName, metricPrefix } = wafNames(appName);
   const tags = [{ Key: "skyforge:managed", Value: "true" }, { Key: "skyforge:app", Value: appName }];
@@ -210,7 +214,7 @@ export async function ensureWebAcl({ credentials, appName, loadBalancerArn, scan
     const created = await waf.send(new CreateIPSetCommand({ Name: ipSetName, Scope: SCOPE, IPAddressVersion: "IPV4", Addresses: [], Description: "SkyForge tripwire bans", Tags: tags }));
     ipSet = created.Summary;
   }
-  const rules = buildWafRules({ appName, scanToken, ipSetArn: ipSet.ARN, tripwirePaths, loginPaths, underAttack });
+  const rules = buildWafRules({ appName, scanToken, ipSetArn: ipSet.ARN, tripwirePaths, loginPaths, underAttack, forwardedIp });
   const base = { Name: webAclName, Scope: SCOPE, DefaultAction: { Allow: {} }, Rules: rules, VisibilityConfig: visibility(`${metricPrefix}-waf`) };
 
   let webAcl = await findByName(waf, ListWebACLsCommand, "WebACLs", webAclName);
@@ -232,7 +236,7 @@ export async function ensureWebAcl({ credentials, appName, loadBalancerArn, scan
   return {
     webAclArn: webAcl.ARN, webAclId: webAcl.Id, webAclName,
     ipSetArn: ipSet.ARN, ipSetId: ipSet.Id, ipSetName,
-    underAttack, tripwirePaths, loginPaths,
+    underAttack, tripwirePaths, loginPaths, forwardedIp,
   };
 }
 
@@ -284,7 +288,8 @@ async function sampled(waf, webAclArn, metric, hours = 3) {
   try {
     const result = await waf.send(new GetSampledRequestsCommand({ WebAclArn: webAclArn, RuleMetricName: metric, Scope: SCOPE, TimeWindow: { StartTime: start, EndTime: end }, MaxItems: 500 }));
     return (result.SampledRequests || []).map((item) => ({
-      ip: item.Request?.ClientIP,
+      // Behind CloudFront the client IP is an edge address; the visitor is the first X-Forwarded-For entry.
+      ip: String((item.Request?.Headers || []).find((header) => /^x-forwarded-for$/i.test(header.Name || ""))?.Value || item.Request?.ClientIP || "").split(",")[0].trim(),
       country: item.Request?.Country || "??",
       path: item.Request?.URI,
       method: item.Request?.Method,

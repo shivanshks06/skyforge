@@ -2,10 +2,7 @@ import { useState, useEffect, useRef } from "react";
 import { useParams, useNavigate, Link } from "react-router-dom";
 import {
   Cloud,
-  Server,
-  Cpu,
   Layers,
-  Activity,
   FileCode,
   DollarSign,
   CheckCircle2,
@@ -16,17 +13,16 @@ import {
   RefreshCw,
   ArrowRight,
   HardDrive,
-  Globe,
-  Sliders,
   Zap,
-  Radio,
   CheckCheck,
   Rocket,
 } from "lucide-react";
 import Card from "../components/Card";
 import Button from "../components/Button";
+import TargetChooser from "../components/TargetChooser";
 import {
   getProjectInfrastructure,
+  updateProjectInfrastructureTarget,
 } from "../services/api";
 
 export default function InfrastructurePreview() {
@@ -39,6 +35,7 @@ export default function InfrastructurePreview() {
   const [copied, setCopied] = useState(false);
   const [notification, setNotification] = useState(null);
   const [loadError, setLoadError] = useState(null);
+  const [switchingTarget, setSwitchingTarget] = useState(false);
   const loadGeneration = useRef(0);
   const notificationTimer = useRef(null);
 
@@ -46,6 +43,21 @@ export default function InfrastructurePreview() {
     window.clearTimeout(notificationTimer.current);
     setNotification({ type, message });
     notificationTimer.current = window.setTimeout(() => setNotification(null), 4000);
+  };
+
+  const handleChooseTarget = async (target) => {
+    if (target === data?.target || switchingTarget) return;
+    try {
+      setSwitchingTarget(true);
+      const res = await updateProjectInfrastructureTarget(id, target);
+      setData(res);
+      if (res.files && Object.keys(res.files).length > 0) setActiveTab(Object.keys(res.files)[0]);
+      showNotification("success", res.message || "Deployment target updated.");
+    } catch (err) {
+      showNotification("error", err.response?.data?.message || "Failed to change the deployment target.");
+    } finally {
+      setSwitchingTarget(false);
+    }
   };
 
   const fetchInfrastructure = async () => {
@@ -217,6 +229,8 @@ export default function InfrastructurePreview() {
             View Dockerfile
           </Button>
           <Button
+            disabled={!data.target}
+            title={data.target ? undefined : "Choose a deployment target first"}
             onClick={() => navigate(`/project/${id}/deploy`)}
             className="flex items-center gap-2 bg-[#9E5D2D] hover:bg-[#844C22] text-white shadow-sm"
           >
@@ -262,25 +276,11 @@ export default function InfrastructurePreview() {
         </div>
       </div>
 
-      {/* Deployment Target */}
-      <Card glow={false} className="bg-gradient-to-r from-[#FAF6F0] via-white to-[#FAF6F0] border border-[#EADFCF] flex flex-col gap-3">
-        <div className="flex items-start justify-between gap-4">
-          <div className="flex items-center gap-2.5">
-            <div className="p-2 rounded-xl bg-[#9E5D2D]/10 text-[#9E5D2D]">
-              <Server className="h-5 w-5" />
-            </div>
-            <div>
-              <h3 className="text-base font-bold text-[#362217]">Cloud Deployment Target: AWS ECS Fargate</h3>
-              <span className="text-[11px] text-[#8C7667]">Dedicated Container Architecture</span>
-            </div>
-          </div>
-          <span className="text-xs font-bold text-[#362217] font-mono shrink-0">~$27 - $36/month</span>
-        </div>
-        <p className="text-xs text-[#5E4C3E]">
-          Application Load Balancer, container auto-recovery, and CloudWatch logs. SkyForge deploys every project, including static frontends, as a container on ECS Fargate.
-        </p>
-      </Card>
+      {/* Deployment Target (nothing preselected) */}
+      <TargetChooser choices={data.choices || []} selected={data.target} onChoose={handleChooseTarget} busy={switchingTarget} />
 
+      {data.target && (
+      <>
       {/* Visual Architecture Topology Diagram */}
       <Card glow={false} className="bg-white border border-[#EAE1D5] flex flex-col gap-4">
         <div className="flex items-center justify-between border-b border-[#EADFCF] pb-3">
@@ -300,76 +300,25 @@ export default function InfrastructurePreview() {
           </span>
         </div>
 
-        {/* Visual Topology Pipeline */}
-        <div className="p-6 rounded-2xl bg-[#FAF8F5] border border-[#EADFCF] flex flex-col md:flex-row items-center justify-between gap-4 overflow-x-auto">
-          <>
-            {/* Node 1 */}
-            <div className="flex flex-col items-center gap-2 p-3.5 rounded-2xl bg-white border border-[#EAE1D5] shadow-xs w-40 shrink-0 text-center">
-              <div className="p-2.5 rounded-xl bg-[#8C7667]/10 text-[#8C7667]">
-                <Globe className="h-5 w-5" />
+        {/* Visual Topology Pipeline (from the server's architecture graph for the chosen target) */}
+        <div className="p-6 rounded-2xl bg-[#FAF8F5] border border-[#EADFCF] flex flex-col md:flex-row items-center gap-3 overflow-x-auto">
+          {(data.architectureGraph?.nodes || []).map((node, index, nodes) => {
+            const link = (data.architectureGraph?.connections || []).find((connection) => connection.from === node.id && connection.to === nodes[index + 1]?.id);
+            return (
+              <div key={node.id} className="flex flex-col md:flex-row items-center gap-3 shrink-0">
+                <div className="flex flex-col items-center gap-1.5 p-3 rounded-2xl bg-white border border-[#EAE1D5] shadow-xs w-36 text-center">
+                  <span className="text-xs font-bold text-[#362217]">{node.label}</span>
+                  <span className="text-[10px] text-[#8C7667] capitalize">{node.type}</span>
+                </div>
+                {index < nodes.length - 1 && (
+                  <div className="flex flex-col items-center text-[#9E5D2D] font-bold text-[10px] w-20 text-center">
+                    <ArrowRight className="h-4 w-4 rotate-90 md:rotate-0" />
+                    <span>{link?.label || ""}</span>
+                  </div>
+                )}
               </div>
-              <span className="text-xs font-bold text-[#362217]">Internet Traffic</span>
-              <span className="text-[10px] text-[#8C7667]">Port 80 / 443</span>
-            </div>
-
-            <div className="flex flex-col items-center text-[#9E5D2D] font-bold text-[11px]">
-              <ArrowRight className="h-5 w-5" />
-              <span>Public Ingress</span>
-            </div>
-
-            {/* Node 2 */}
-            <div className="flex flex-col items-center gap-2 p-3.5 rounded-2xl bg-white border border-[#EAE1D5] shadow-xs w-44 shrink-0 text-center">
-              <div className="p-2.5 rounded-xl bg-[#3B7A75]/10 text-[#3B7A75]">
-                <Radio className="h-5 w-5" />
-              </div>
-              <span className="text-xs font-bold text-[#362217]">VPC Gateway</span>
-              <span className="text-[10px] text-[#8C7667]">2 Public Subnets</span>
-            </div>
-
-            <div className="flex flex-col items-center text-[#9E5D2D] font-bold text-[11px]">
-              <ArrowRight className="h-5 w-5" />
-              <span>Health Check</span>
-            </div>
-
-            {/* Node 3 */}
-            <div className="flex flex-col items-center gap-2 p-3.5 rounded-2xl bg-white border border-[#EAE1D5] shadow-xs w-44 shrink-0 text-center">
-              <div className="p-2.5 rounded-xl bg-[#9E5D2D]/10 text-[#9E5D2D]">
-                <Sliders className="h-5 w-5" />
-              </div>
-              <span className="text-xs font-bold text-[#362217]">ALB Router</span>
-              <span className="text-[10px] text-[#8C7667]">Dynamic Routing</span>
-            </div>
-
-            <div className="flex flex-col items-center text-[#9E5D2D] font-bold text-[11px]">
-              <ArrowRight className="h-5 w-5" />
-              <span>Container Port</span>
-            </div>
-
-            {/* Node 4 */}
-            <div className="flex flex-col items-center gap-2 p-3.5 rounded-2xl bg-white border-2 border-[#9E5D2D] shadow-xs w-48 shrink-0 text-center">
-              <div className="p-2.5 rounded-xl bg-[#9E5D2D]/10 text-[#9E5D2D]">
-                <Cpu className="h-5 w-5" />
-              </div>
-              <span className="text-xs font-bold text-[#362217]">ECS Fargate Tasks</span>
-              <span className="text-[10px] text-[#2E6B4F] font-semibold">
-                {project.cpu || "0.5 vCPU"} / {project.memory || "1 GB"}
-              </span>
-            </div>
-
-            <div className="flex flex-col items-center text-[#9E5D2D] font-bold text-[11px]">
-              <ArrowRight className="h-5 w-5" />
-              <span>Logs</span>
-            </div>
-
-            {/* Node 5 */}
-            <div className="flex flex-col items-center gap-2 p-3.5 rounded-2xl bg-white border border-[#EAE1D5] shadow-xs w-40 shrink-0 text-center">
-              <div className="p-2.5 rounded-xl bg-[#8C7667]/10 text-[#8C7667]">
-                <Activity className="h-5 w-5" />
-              </div>
-              <span className="text-xs font-bold text-[#362217]">CloudWatch</span>
-              <span className="text-[10px] text-[#8C7667]">7-Day Stream</span>
-            </div>
-          </>
+            );
+          })}
         </div>
       </Card>
 
@@ -573,6 +522,8 @@ export default function InfrastructurePreview() {
           </Button>
         </div>
       </div>
+      </>
+      )}
     </div>
   );
 }

@@ -62,6 +62,7 @@ export const saveProjectDockerFiles = async (id, dockerfile, dockerignore) => (a
 
 export const deleteProject = async (id) => (await api.delete(`/projects/${id}`)).data;
 export const getProjectInfrastructure = async (id) => (await api.get(`/projects/${id}/infrastructure`)).data;
+export const updateProjectInfrastructureTarget = async (id, target) => (await api.post(`/projects/${id}/infrastructure/target`, { target })).data;
 
 export const getAwsStatus = async () => (await api.get("/aws/status")).data;
 export const initiateAwsSetup = async (region) => (await api.post("/aws/setup", { region })).data;

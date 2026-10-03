@@ -4,8 +4,8 @@ import { fileURLToPath } from "node:url";
 import prisma from "../config/db.js";
 import { emitDeploymentLog } from "./logsService.js";
 import { getAwsCredentials } from "./awsConnectionService.js";
-import { destroyEcsResources, discoverProjectResources } from "./ecsService.js";
-import { destroyStaticResources } from "./staticDeployer.js";
+import { destroyEcsResources, discoverProjectResources, resourceNames } from "./ecsService.js";
+import { destroyStaticResources, discoverStaticResources } from "./staticDeployer.js";
 import { createEcrClient, getRepositoryName } from "./ecrService.js";
 import { DeleteRepositoryCommand, DescribeRepositoriesCommand, ListTagsForResourceCommand } from "@aws-sdk/client-ecr";
 import { STSClient, GetCallerIdentityCommand } from "@aws-sdk/client-sts";
@@ -87,15 +87,39 @@ async function deleteEcrRepositories(credentials, deploymentId, recordedNames = 
  */
 async function sweepAndVerify({ credentials, project, deploymentId }) {
   const repositoryName = getRepositoryName(project);
-  const before = await discoverProjectResources({ credentials, project, repositoryName });
+  const appName = resourceNames(project).appName;
+  const discover = async () => {
+    const ecs = await discoverProjectResources({ credentials, project, repositoryName });
+    const statics = await discoverStaticResources({ credentials, project, appName });
+    return { ecs, statics, found: [...ecs.found, ...statics.found] };
+  };
+  const before = await discover();
   if (before.found.length) {
     emitDeploymentLog(deploymentId, { stage: "DESTROY", message: `[SWEEP] Removing ${before.found.length} remaining resource(s): ${before.found.join("; ")}`, level: "warn" });
-    await destroyEcsResources({ credentials, resources: before.manifest, deploymentId });
-    if (before.manifest.repositoryName) await deleteEcrRepositories(credentials, deploymentId, [before.manifest.repositoryName]);
+    // CloudFront first: distributions reference the bucket and the load balancer.
+    for (const manifest of before.statics.manifests) await destroyStaticResources({ credentials, resources: manifest, deploymentId });
+    if (before.ecs.found.length) {
+      await destroyEcsResources({ credentials, resources: before.ecs.manifest, deploymentId });
+      if (before.ecs.manifest.repositoryName) await deleteEcrRepositories(credentials, deploymentId, [before.ecs.manifest.repositoryName]);
+    }
   }
-  const after = await discoverProjectResources({ credentials, project, repositoryName });
+  const after = await discover();
   if (after.found.length) throw new Error(`These AWS resources still exist after teardown: ${after.found.join("; ")}`);
   emitDeploymentLog(deploymentId, { stage: "DESTROY", message: "[SWEEP] Verified with AWS: no resources for this project remain, so it no longer incurs charges.", level: "success" });
+}
+
+/** Post-launch security setup (firewall, scan) may still be running; let it finish first. */
+async function waitForSecuritySetup(projectId, deploymentId) {
+  const deadline = Date.now() + 10 * 60_000;
+  let announced = false;
+  for (;;) {
+    const project = await prisma.project.findUnique({ where: { id: projectId }, select: { protection: true } });
+    const since = Date.parse(project?.protection?.securingSince || "");
+    if (!since || Date.now() - since > 15 * 60_000 || Date.now() > deadline) return;
+    if (!announced) emitDeploymentLog(deploymentId, { stage: "DESTROY", message: "[DESTROY] Waiting for post-launch security setup to finish before deleting resources...", level: "info" });
+    announced = true;
+    await new Promise((resolve) => setTimeout(resolve, 5000));
+  }
 }
 
 function supersededError(message = "This teardown operation was superseded by a newer project operation.") {
@@ -178,6 +202,7 @@ export async function destroyProjectInfrastructure({ projectId, deploymentId, us
     }
     if (!deploymentIds.includes(operation.id)) deploymentIds.push(operation.id);
     const resources = snapshotResources(operation.teardownResources, fallback);
+    await waitForSecuritySetup(projectId, operation.id);
 
     const claim = await prisma.deployment.updateMany({
       where: { id: operation.id, ...(jobId ? { workerJobId: jobId } : {}) },

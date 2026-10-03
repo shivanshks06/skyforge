@@ -12,6 +12,7 @@ import { getRedisStatus } from "../redis/connection.js";
 import { toPublicDeployment } from "../services/deploymentSerializer.js";
 import { toPublicProject } from "../services/projectSerializer.js";
 import { effectiveRequiredEnv } from "../services/envScanner.js";
+import { normalizeTarget, TARGETS } from "../services/targets.js";
 import { uniqueResources, validateResourceManifests } from "../services/resourceUtils.js";
 
 const ACTIVE_STATUSES = ["QUEUED", "BUILDING", "PUSHING", "PROVISIONING", "DEPLOYING", "HEALTH_CHECK", "ROLLING_BACK", "DESTROYING"];
@@ -80,7 +81,11 @@ async function preflight(project) {
     blockers.push(error.message);
   }
 
-  const required = effectiveRequiredEnv(project);
+  const target = normalizeTarget(project.deploymentTarget);
+  if (!target) blockers.push("Choose a deployment target (ECS Fargate, ECS Fargate + CloudFront, or S3 + CloudFront) on the Infrastructure page.");
+  if (target === TARGETS.S3_CLOUDFRONT && !/^\d{12}$/.test(credentials?.accountId || "")) blockers.push("The AWS account ID is needed for the S3 bucket name; reconnect AWS.");
+  // Static sites have no server, so runtime variables do not apply.
+  const required = target === TARGETS.S3_CLOUDFRONT ? [] : effectiveRequiredEnv(project);
   const configured = decryptObjectValues(project.envConfig || {});
   for (const key of required) {
     if (configured[key] === undefined || configured[key] === null || String(configured[key]).trim() === "") blockers.push(`Environment variable ${key} is not configured.`);
@@ -94,7 +99,7 @@ async function preflight(project) {
 export const triggerDeployment = async (req, res) => {
   try {
     const project = await requireOwnedProject(req.params.projectId, req.user?.id);
-    const target = "AWS_ECS_FARGATE";
+    const target = normalizeTarget(project.deploymentTarget);
     const { blockers } = await preflight(project);
     if (blockers.length) return res.status(422).json({ message: "Deployment preflight failed", blockers });
     if (!getRedisStatus().connected && process.env.ALLOW_INLINE_JOBS !== "true") {
@@ -179,7 +184,7 @@ export const retryDeployment = async (req, res) => {
       return res.status(409).json({ message: `Only failed or cancelled deployments can be retried (current: ${deployment.status}).` });
     }
     const project = await requireOwnedProject(deployment.projectId, req.user?.id);
-    const target = "AWS_ECS_FARGATE";
+    const target = normalizeTarget(project.deploymentTarget);
     const { blockers } = await preflight(project);
     if (blockers.length) return res.status(422).json({ message: "Deployment preflight failed", blockers });
 

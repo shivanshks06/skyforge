@@ -72,14 +72,6 @@ function normalizeRepository(repoName, githubUrl) {
   return { repoName: `${owner}/${repo}`, githubUrl: `https://github.com/${owner}/${repo}` };
 }
 
-function normalizeDeploymentTarget(value) {
-  const normalized = String(value || "AWS ECS Fargate").trim().toLowerCase();
-  if (["aws ecs fargate", "aws_ecs_fargate", "ecs fargate", "ecs_fargate", "fargate", "ecs"].includes(normalized)) {
-    return "AWS ECS Fargate";
-  }
-  return "AWS ECS Fargate";
-}
-
 function parsePort(value) {
   if (value === null || value === undefined || value === "") return null;
   const port = Number(value);
@@ -138,7 +130,6 @@ export const createProject = async (req, res) => {
       dockerized = false,
       requiredEnv = [],
       envAnalysis,
-      deploymentTarget = "AWS ECS Fargate",
       confidence,
       githubUrl,
     } = req.body || {};
@@ -170,7 +161,6 @@ export const createProject = async (req, res) => {
     const buildToolValue = normalizeMetadata(buildTool, "Build tool", 80);
     const buildCommandValue = normalizeMetadata(buildCommand, "Build command", 500);
     const startCommandValue = normalizeMetadata(startCommand, "Start command", 500);
-    const deploymentTargetValue = normalizeDeploymentTarget(normalizeMetadata(deploymentTarget, "Deployment target", 120));
 
     const project = await prisma.project.create({
       data: {
@@ -187,7 +177,8 @@ export const createProject = async (req, res) => {
         dockerized: dockerized === true,
         requiredEnv: normalizeRequiredEnv(requiredEnv),
         ...(sanitizeEnvAnalysis(envAnalysis) ? { envAnalysis: sanitizeEnvAnalysis(envAnalysis) } : {}),
-        deploymentTarget: deploymentTargetValue,
+        // The owner picks ECS Fargate, ECS + CloudFront, or S3 + CloudFront explicitly later.
+        deploymentTarget: null,
         confidence: parseConfidence(confidence),
         githubUrl: repository.githubUrl,
         status: "Imported",

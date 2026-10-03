@@ -168,7 +168,8 @@ export async function runSelfPentest(liveUrl, { scanToken, timeoutMs = 8000 } = 
   ].filter(([name]) => !headers[name] && !(name === "x-frame-options" && /frame-ancestors/i.test(headers["content-security-policy"] || "")));
   if (missingHeaders.length) add({ rule: "missing-security-headers", severity: "low", location: "/", title: `Missing security headers: ${missingHeaders.map(([, label]) => label).join(", ")}`, detail: "Without them browsers allow clickjacking and MIME-type sniffing.", fix: "Static sites deployed by SkyForge get them automatically. For app servers: Django SecurityMiddleware + X_FRAME_OPTIONS, Express helmet(), Flask-Talisman." });
 
-  const banner = [headers["x-powered-by"], /\d/.test(headers.server || "") ? headers.server : null].filter(Boolean);
+  // Only real version numbers count ("nginx/1.25.3", not "AmazonS3").
+  const banner = [headers["x-powered-by"], /\d+\.\d+/.test(headers.server || "") ? headers.server : null].filter(Boolean);
   if (banner.length) add({ rule: "version-banner", severity: "low", location: "/", title: `Server software and version disclosed (${banner.join(", ").slice(0, 80)})`, detail: "Helps attackers pick exploits for the exact version.", fix: "Remove the X-Powered-By / Server version headers (e.g. app.disable('x-powered-by'))." });
 
   for (const cookie of [].concat(headers["set-cookie"] || [])) {

@@ -12,7 +12,7 @@ import {
   validateDockerContent,
   saveDockerFiles,
 } from "../controllers/dockerController.js";
-import { getInfrastructure } from "../controllers/infrastructureController.js";
+import { getInfrastructure, updateInfrastructureTarget } from "../controllers/infrastructureController.js";
 import { getSecurity, setSecurityTier, setUnderAttack, unbanIp, runSecurityScan, createSecurityFix, takeOffline, bringOnline } from "../controllers/securityController.js";
 import protect from "../middleware/authMiddleware.js";
 import { rateLimit } from "../middleware/rateLimit.js";
@@ -54,6 +54,7 @@ router.post("/:id/docker/save", blueprintMutationLimit, saveDockerFiles);
 
 // Sprint 7 Cloud Infrastructure & Terraform routes
 router.get("/:id/infrastructure", blueprintMutationLimit, getInfrastructure);
+router.post("/:id/infrastructure/target", blueprintMutationLimit, updateInfrastructureTarget);
 
 // Security tiers, scans, firewall controls, and taking the site offline without destroying it
 const securityLimit = rateLimit({

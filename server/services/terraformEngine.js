@@ -2,7 +2,7 @@ import fs from "fs";
 import crypto from "crypto";
 import path from "path";
 import { fileURLToPath } from "url";
-import { planInfrastructure } from "./infrastructurePlanner.js";
+import { AWS_TARGETS, planInfrastructure } from "./infrastructurePlanner.js";
 import { estimateInfrastructureCost } from "./costEstimator.js";
 
 const __filename = fileURLToPath(import.meta.url);
@@ -16,8 +16,9 @@ const GENERATED_DIR = path.join(__dirname, "../generated");
  * writes files to server/generated/:projectId/terraform/, and produces infrastructure.json.
  */
 
-export function generateTerraformBlueprints(project = {}, plan = {}, requestedRegion = null) {
-  const infraPlan = planInfrastructure(project);
+export function generateTerraformBlueprints(project = {}, plan = {}, envValues = {}, customTarget = null, requestedRegion = null) {
+  const infraPlan = planInfrastructure(project, customTarget);
+  if (!infraPlan) return null; // no target chosen yet
   const target = infraPlan.target;
   const cost = estimateInfrastructureCost(target, { cpu: plan.cpu, memory: plan.memory });
 
@@ -36,17 +37,37 @@ export function generateTerraformBlueprints(project = {}, plan = {}, requestedRe
 
   const files = {};
 
-  const ecsTemplateDir = path.join(TEMPLATES_DIR, "ecs-fargate");
-  const moduleNames = ["main.tf", "variables.tf", "outputs.tf", "networking.tf", "ecs.tf", "iam.tf"];
+  if (target === AWS_TARGETS.S3_CLOUDFRONT) {
+    const s3TemplateDir = path.join(TEMPLATES_DIR, "s3-cloudfront");
+    const moduleNames = ["main.tf", "variables.tf", "outputs.tf", "s3.tf", "cloudfront.tf"];
 
-  for (const mod of moduleNames) {
-    const p = path.join(ecsTemplateDir, mod);
-    if (fs.existsSync(p)) {
-      files[mod] = fs.readFileSync(p, "utf-8");
+    for (const mod of moduleNames) {
+      const p = path.join(s3TemplateDir, mod);
+      if (fs.existsSync(p)) {
+        files[mod] = fs.readFileSync(p, "utf-8");
+      }
     }
-  }
 
-  files["terraform.tfvars"] = `# SkyForge ECS Fargate infrastructure preview
+    // terraform.tfvars
+    files["terraform.tfvars"] = `# SkyForge S3 + CloudFront infrastructure preview
+# The live worker provisions the distribution through the AWS SDK.
+app_name      = ${hclString(appName)}
+aws_region    = ${hclString(region)}
+custom_domain = ""
+`;
+  } else {
+    // Target: ECS Fargate
+    const ecsTemplateDir = path.join(TEMPLATES_DIR, "ecs-fargate");
+    const moduleNames = ["main.tf", "variables.tf", "outputs.tf", "networking.tf", "ecs.tf", "iam.tf"];
+
+    for (const mod of moduleNames) {
+      const p = path.join(ecsTemplateDir, mod);
+      if (fs.existsSync(p)) {
+        files[mod] = fs.readFileSync(p, "utf-8");
+      }
+    }
+
+    files["terraform.tfvars"] = `# SkyForge ECS Fargate infrastructure preview
 # Replace the image with the immutable ECR URI/digest emitted by a successful deployment.
 app_name            = ${hclString(appName)}
 aws_region          = ${hclString(region)}
@@ -57,7 +78,7 @@ health_check_path   = ${hclString(healthCheck)}
 container_image     = "REPLACE_WITH_VERIFIED_ECR_IMAGE_URI"
 environment_variables = {}
 `;
-
+  }
 
   // Infrastructure Manifest (infrastructure.json)
   const manifest = {
