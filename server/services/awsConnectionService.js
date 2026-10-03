@@ -102,7 +102,7 @@ export function generateCloudFormationTemplate(externalId, skyforgeAccountId = g
                   Action: [
                     "ec2:DescribeVpcs", "ec2:DescribeSubnets", "ec2:DescribeSecurityGroups", "ec2:DescribeManagedPrefixLists",
                     "ec2:CreateSecurityGroup", "ec2:DeleteSecurityGroup", "ec2:AuthorizeSecurityGroupIngress",
-                    "ec2:RevokeSecurityGroupIngress",
+                    "ec2:RevokeSecurityGroupIngress", "ec2:AuthorizeSecurityGroupEgress", "ec2:RevokeSecurityGroupEgress",
                     "elasticloadbalancing:CreateLoadBalancer", "elasticloadbalancing:DeleteLoadBalancer",
                     "elasticloadbalancing:DescribeLoadBalancers", "elasticloadbalancing:CreateTargetGroup",
                     "elasticloadbalancing:DeleteTargetGroup", "elasticloadbalancing:DescribeTargetGroups", "elasticloadbalancing:ModifyTargetGroup", "elasticloadbalancing:ModifyTargetGroupAttributes", "elasticloadbalancing:DescribeTargetHealth",
@@ -116,7 +116,7 @@ export function generateCloudFormationTemplate(externalId, skyforgeAccountId = g
                   Effect: "Allow",
                   Action: [
                     "iam:CreateRole", "iam:DeleteRole", "iam:GetRole", "iam:AttachRolePolicy", "iam:DetachRolePolicy", "iam:PutRolePolicy", "iam:DeleteRolePolicy",
-                    "iam:PassRole", "iam:ListAttachedRolePolicies",
+                    "iam:PassRole", "iam:ListAttachedRolePolicies", "iam:ListRolePolicies", "iam:GetRolePolicy",
                     "logs:CreateLogGroup", "logs:DeleteLogGroup", "logs:DescribeLogGroups",
                     "secretsmanager:CreateSecret", "secretsmanager:DescribeSecret", "secretsmanager:PutSecretValue", "secretsmanager:DeleteSecret",
                     "logs:CreateLogStream", "logs:PutLogEvents", "logs:GetLogEvents",
@@ -130,7 +130,7 @@ export function generateCloudFormationTemplate(externalId, skyforgeAccountId = g
                     "wafv2:CreateWebACL", "wafv2:UpdateWebACL", "wafv2:DeleteWebACL", "wafv2:GetWebACL", "wafv2:ListWebACLs",
                     "wafv2:AssociateWebACL", "wafv2:DisassociateWebACL", "wafv2:GetWebACLForResource", "wafv2:ListResourcesForWebACL",
                     "wafv2:CreateIPSet", "wafv2:UpdateIPSet", "wafv2:DeleteIPSet", "wafv2:GetIPSet", "wafv2:ListIPSets",
-                    "wafv2:GetSampledRequests", "wafv2:TagResource",
+                    "wafv2:GetSampledRequests", "wafv2:TagResource", "cloudwatch:GetMetricStatistics",
                     "elasticloadbalancing:SetWebAcl", "elasticloadbalancing:ModifyLoadBalancerAttributes", "elasticloadbalancing:DescribeRules", "elasticloadbalancing:CreateRule", "elasticloadbalancing:DeleteRule",
                     "iam:CreateUser", "iam:GetUser", "iam:DeleteUser", "iam:TagUser", "iam:CreateAccessKey", "iam:DeleteAccessKey",
                     "iam:ListAccessKeys", "iam:GetAccessKeyLastUsed",

@@ -36,6 +36,8 @@ import {
   PutBucketTaggingCommand,
 } from "@aws-sdk/client-s3";
 import { emitDeploymentLog } from "./logsService.js";
+import { deleteWebAcl } from "./wafService.js";
+import { deleteCanary } from "./canaryService.js";
 import { isBlockedSecretFile } from "./secretFilePolicy.js";
 import { awsDomainSuffixForRegion, awsPartitionForRegion } from "./awsPartition.js";
 
@@ -658,7 +660,7 @@ export async function rollbackStaticDistribution({ credentials, resources, previ
 }
 
 export async function destroyStaticResources({ credentials, resources, deploymentId }) {
-  if (!credentials?.accessKeyId || !(resources?.bucket || resources?.distributionId || resources?.oacId)) return;
+  if (!credentials?.accessKeyId || !(resources?.bucket || resources?.distributionId || resources?.oacId || resources?.honeyUserName || resources?.cloudfrontWebAclId)) return;
   const config = clientConfig(credentials);
   const s3 = new S3Client(config);
   const cloudfront = new CloudFrontClient(config);
@@ -712,6 +714,17 @@ export async function destroyStaticResources({ credentials, resources, deploymen
     } catch (error) {
       if (!isMissingResourceError(error)) throw error;
     }
+  }
+
+  // Security extras: the CloudFront firewall can only be deleted once no distribution uses it.
+  const appName = resources.appName || resources.securityAppName;
+  if (appName && (resources.cloudfrontWebAclId || resources.cloudfrontWaf)) {
+    await deleteWebAcl({ credentials, appName, scope: "CLOUDFRONT", webAclId: resources.cloudfrontWebAclId, ipSetId: resources.cloudfrontIpSetId });
+    emitDeploymentLog(deploymentId, { stage: "DESTROY", message: "[WAF] CloudFront firewall deleted.", level: "success" });
+  }
+  if (resources.honeyUserName) {
+    await deleteCanary({ credentials, appName, userName: resources.honeyUserName });
+    emitDeploymentLog(deploymentId, { stage: "DESTROY", message: "[DECEPTION] Honey-credential IAM user deleted.", level: "success" });
   }
 
   if (!bucketExists) {
@@ -855,4 +868,32 @@ export async function discoverStaticResources({ credentials, project, appName })
     });
   }
   return { manifests, found };
+}
+
+/**
+ * Deception for static sites: uploads decoy files (fake .env / AWS credentials holding a honey key,
+ * and a bait robots.txt) into the live release, and into the bucket root for website hosting.
+ */
+export async function plantStaticDecoys({ credentials, resources, objects }) {
+  if (!resources?.bucket || !resources.releasePrefix || !objects?.length) return [];
+  const s3 = new S3Client(clientConfig(credentials));
+  const keys = [];
+  for (const object of objects) {
+    const targets = [`${resources.releasePrefix}${object.key}`, ...(resources.type === "S3_STATIC_WEBSITE" ? [object.key] : [])];
+    for (const Key of targets) {
+      await s3.send(new PutObjectCommand({ Bucket: resources.bucket, Key, Body: object.body, ContentType: object.contentType, CacheControl: "no-store" }));
+    }
+    keys.push(object.key);
+  }
+  return keys;
+}
+
+/** Attaches (or with an empty ARN detaches) a CLOUDFRONT-scope web ACL to a distribution. */
+export async function attachWebAclToDistribution({ credentials, distributionId, webAclArn }) {
+  const cloudfront = new CloudFrontClient(clientConfig(credentials));
+  const current = await cloudfront.send(new GetDistributionCommand({ Id: distributionId }));
+  const config = current.Distribution.Config;
+  if ((config.WebACLId || "") === (webAclArn || "")) return false;
+  await cloudfront.send(new UpdateDistributionCommand({ Id: distributionId, IfMatch: current.ETag, DistributionConfig: { ...config, WebACLId: webAclArn || "" } }));
+  return true;
 }

@@ -3,6 +3,7 @@ import { AuthContext } from "../context/authContext.js";
 import Card from "../components/Card";
 import Button from "../components/Button";
 import Input from "../components/Input";
+import AlertSettingsCard from "../components/AlertSettingsCard";
 import {
   User,
   Mail,
@@ -694,6 +695,8 @@ export default function Settings() {
           </div>
         )}
       </Card>
+
+      <AlertSettingsCard />
 
       {/* GitHub Integration Card */}
       <Card glow={false} className="flex flex-col gap-5 bg-white border border-[#EAE1D5]">

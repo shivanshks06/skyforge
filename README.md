@@ -10,7 +10,8 @@ You connect GitHub and AWS, pick a repository, choose a deployment target, and p
 4. builds a production container image and pushes it to Amazon ECR;
 5. runs it on the chosen target: ECS Fargate behind an Application Load Balancer (optionally with CloudFront in front), or S3 + CloudFront for static sites;
 6. waits for a real HTTP health check before calling it **LIVE**;
-7. scans the live site for security problems and, if you choose, puts an AWS WAF firewall in front of it.
+7. scans the live site for security problems and, if you choose, puts an AWS WAF firewall in front of it;
+8. keeps watching: 21 attack-prevention features run for as long as the site is live, including decoys, honey credentials, automatic incident response with Email/Slack/Discord/Telegram alerts, leak and CVE watch, and an AI red team.
 
 **One-Click Destroy** removes every AWS resource the project created. SkyForge then asks AWS whether anything is left, and only reports success when nothing is, so a destroyed project stops costing money.
 
@@ -53,10 +54,12 @@ You connect GitHub and AWS, pick a repository, choose a deployment target, and p
 | **Security scanning** | Static code scan, a safe self-pentest of the live site, and a container image CVE scan, combined into a score from 0 to 100 and a grade from A to F. |
 | **AI fix pull requests** | One click turns a finding (such as `DEBUG = True` or a hard-coded secret) into a commit and pull request on GitHub. |
 | **Canary secrets** | Plants a credential with no permissions in the container; any use of it means the container's secrets have leaked. |
-| **Protected tier (WAF)** | OWASP, SQL-injection, known-exploit and IP-reputation rules, rate limiting, code-aware login limits, honeypot auto-ban, Under Attack mode, and an attack dashboard. |
+| **Protected tier (WAF)** | OWASP, SQL-injection, known-exploit and IP-reputation rules, self-tuning rate limits, code-aware login limits, honeypot auto-ban, Under Attack mode, and an attack dashboard. Works on the ALB and on CloudFront. |
+| **21 attack-prevention features** | Deception (decoy `.env` + honey credentials + `robots.txt` bait), security gate, outbound firewall, admin lockdown + rotating door, bot challenge, herd immunity, read-only containers, code-derived IAM, leak watch, OSV CVE alerts, push-time secret detection, blast radius, attack replay, surface diff, denial-of-wallet guard, AI red team. |
+| **Alerts and incident response** | Email, Slack, Discord, Telegram and signed webhooks. Every incident records what SkyForge did automatically (Under Attack mode, bans, restart, offline) and what you should do. |
 | **Site availability** | Take a site offline (maintenance page, container stopped) and bring it back without redeploying. |
 | **Verified teardown** | Deletes every project resource, then sweeps AWS by name and only succeeds once nothing remains. |
-| **Monitoring** | Health checks every minute, ban-list sync, canary checks, and automatic recovery after worker restarts. |
+| **Monitoring** | Health checks every minute, scheduled security automation (bans, honey and canary keys, attack spikes, pushes, cost, rate-limit tuning, leaks, CVEs, door rotation), and automatic recovery after worker restarts. |
 
 ---
 
@@ -225,27 +228,31 @@ Values are encrypted at rest (AES-GCM with `FIELD_ENCRYPTION_KEY`) and injected 
 
 ## Security
 
-Each project has a security tier, chosen on the **Security & Uptime** page (`/project/:id/security`).
+Each project has a security tier and a set of protection switches, all on the **Security & Uptime** page (`/project/:id/security`). Alert channels are set once per account under **Settings → Security alerts**.
 
-| | **Free** ($0) | **Protected** (about $14/month) |
+| | **Free** ($0) | **Protected** (about $14–20/month) |
 |---|:---:|:---:|
 | Security score: code scan + safe self-pentest after every deployment | ✅ | ✅ |
-| Detection of debug mode, hard-coded secrets, committed `.env` files, and insecure configuration | ✅ | ✅ |
-| One-click AI fix pull requests | ✅ | ✅ |
-| Container image vulnerability (CVE) scan | ✅ | ✅ |
-| Canary secret | ✅ | ✅ |
-| Security headers on static sites, ALB header hardening, AWS Shield Standard | ✅ | ✅ |
-| AWS WAF: OWASP core rules, SQL injection, known bad inputs, IP reputation | | ✅ |
-| Rate limiting (2,000 requests per 5 minutes per IP) | | ✅ |
-| Code-aware login rate limit (100 per 5 minutes on login and auth routes found in the source) | | ✅ |
-| Honeypot tripwires with a 24-hour auto-ban, and an Unban button | | ✅ |
-| Under Attack mode and a blocked-attack dashboard | | ✅ |
+| Container image CVE scan, canary secret, one-click AI fix pull requests | ✅ | ✅ |
+| Security gate before traffic switches (#2) | ✅ | ✅ |
+| Alerts on Email, Slack, Discord, Telegram and webhooks, plus automatic incident response (#6) | ✅ | ✅ |
+| New-CVE alerts from OSV (#8), push-time secret detection (#9), leak watch (#11) | ✅ | ✅ |
+| Outbound firewall (#3), tamper-proof read-only containers (#10), AWS permissions generated from the code (#14) | ✅ (ECS) | ✅ (ECS) |
+| Blast-radius map (#13), attack-surface diff per deploy (#18), denial-of-wallet guard (#19), AI red-team rehearsal (#20) | ✅ | ✅ |
+| Decoy secrets with honey credentials and `robots.txt` bait (#1, #15, #16) | ✅ static sites | ✅ all targets |
+| AWS WAF: OWASP core, SQL injection, known bad inputs, IP reputation | | ✅ |
+| Tripwire auto-bans and herd immunity across projects (#12) | | ✅ |
+| Self-tuning rate limits (#7) and code-aware login limits | | ✅ |
+| Admin lockdown (#4), rotating admin door (#21), bot challenge (#5) | | ✅ |
+| Under Attack mode (manual or automatic), attack dashboard, attack replay (#17) | | ✅ |
 
-Protected tier pricing is AWS WAF's: $5 per web ACL plus $1 per rule (9 rules), plus $0.60 per million requests. Switching tiers on a live site applies or removes the firewall immediately.
+Protected-tier pricing is AWS WAF's: $5 per web ACL, $1 per rule per month (9 to 15 rules depending on which features are on), and $0.60 per million requests. Switching tiers or toggling a feature on a live site takes effect immediately, except the read-only filesystem, which applies on the next deployment.
+
+The numbers (#1–#21) refer to the 21 attack-prevention features listed in [The 21 attack-prevention features](#the-21-attack-prevention-features).
 
 ### Security score
 
-`server/services/securityScanner.js` combines three sources into one score. Each finding deducts points by severity (critical 30, high 15, medium 7, low 2), and the result is graded A (90+), B (75+), C (60+), D (40+), or F.
+`server/services/securityScanner.js` combines four sources into one score. Each finding deducts points by severity (critical 30, high 15, medium 7, low 2), and the result is graded A (90+), B (75+), C (60+), D (40+), or F.
 
 **1. Code scan**
 
@@ -277,7 +284,11 @@ Protected tier pricing is AWS WAF's: $5 per web ACL plus $1 per rule (9 rules), 
 - open redirects;
 - HTTP without TLS.
 
-**3. Image scan.** ECR basic scanning (free) of the image that actually runs (`linux/amd64`, even when Docker pushes a multi-platform index). Critical and high CVE counts become findings.
+SkyForge's own decoy files are recognised by their honey key and never reported as leaks.
+
+**3. Leak watch.** The site's pages and same-origin JavaScript bundles are searched for the project's real secret values (see [#11](#11-secret-aware-response-firewall-leak-watch)).
+
+**4. Image scan.** ECR basic scanning (free) of the image that actually runs (`linux/amd64`, even when Docker pushes a multi-platform index). Critical and high CVE counts become findings.
 
 The scan runs automatically after every deployment and on demand with **Run security scan**.
 
@@ -292,28 +303,249 @@ The scan runs automatically after every deployment and on demand with **Run secu
 
 ### Canary secret
 
-On the first deployment, SkyForge creates an IAM user named `<app>-canary` with **no permissions** and plants its access key in the container as `AWS_BACKUP_ACCESS_KEY_ID` / `AWS_BACKUP_SECRET_ACCESS_KEY`. Nothing legitimate ever uses it. The monitor checks `GetAccessKeyLastUsed` about every 10 minutes. Any use produces a **critical** finding: the container's environment has leaked, so rotate your secrets. IAM users are free, and the canary is deleted on destroy.
+On the first deployment, SkyForge creates an IAM user named `<app>-canary` with **no permissions** and plants its access key in the container as `AWS_BACKUP_ACCESS_KEY_ID` / `AWS_BACKUP_SECRET_ACCESS_KEY`. Nothing legitimate ever uses it. The monitor checks `GetAccessKeyLastUsed` about every 10 minutes. Any use raises a **critical** incident: the container's environment has leaked, so rotate your secrets. On the Protected tier the automatic response switches Under Attack mode on for 2 hours. IAM users are free, and the canary is deleted on destroy.
 
-### Protected tier: AWS WAF on the load balancer
+### The firewall (Protected tier)
 
-`server/services/wafService.js` creates a regional web ACL attached to the project's ALB. It does not need CloudFront. Its rules run in this order:
+`server/services/wafService.js` creates one web ACL per project:
 
-1. **SkyForge scanner allow.** Requests carrying the project's secret `x-skyforge-scan` header pass, so the self-pentest checks the app itself and never trips its own honeypots.
-2. **Banned IPs.** An IP set filled by the tripwire.
-3. **Tripwire.** Requests for paths that scanners probe, such as `/.env`, `/.git/`, `/.aws/`, `/wp-login.php`, `/xmlrpc.php`, `/phpmyadmin`, `/cgi-bin/`, `/vendor/phpunit`, `/server-status`, and `/actuator/`, are blocked. The list is **code-aware**: it leaves out any path the app itself serves, such as WordPress paths for PHP apps, `/actuator/` for Spring, and routes found in the source. The monitor bans the offending IPs for 24 hours.
-4. **Login rate limit.** 100 requests per 5 minutes per IP on login, auth, token, and admin routes, including routes extracted from Express, Django, Flask, FastAPI, Spring, Rails, Laravel, and Next.js file routes.
-5. **Global rate limit.** 2,000 requests per 5 minutes per IP.
-6. **AWS managed rule groups.**
-   - IP reputation, known bad inputs, and SQL injection.
-   - The OWASP core rule set, with its 8 KB request-body limit switched to count-only so uploads keep working.
+- **ECS targets:** REGIONAL scope, attached to the project's ALB. It does not need CloudFront. Behind CloudFront (ECS + CloudFront target), every IP-based rule reads the visitor's address from `X-Forwarded-For`, so bans and limits hit the real client, not CloudFront's edge.
+- **S3 + CloudFront:** CLOUDFRONT scope (created in us-east-1, as AWS requires) and attached to the distribution. S3 website hosting, which SkyForge falls back to while CloudFront is unavailable on the account, cannot have a firewall; the Security page says so, and decoys, leak watch, and scanning still apply.
 
-**Under Attack mode** tightens the limits to 300 per 5 minutes globally and 20 on login routes; turning it off restores the normal limits. The **attack dashboard** summarizes blocked requests sampled over the last 3 hours, broken down by rule, attacker IP, country, and targeted path.
+Rules run in this order. Each one appears only when its feature is on.
+
+| # | Rule | What it does |
+|---|---|---|
+| 1 | `skyforge-scanner` | Allows requests with the project's secret `x-skyforge-scan` header, so SkyForge's own scans test the app itself and never trip its traps. |
+| 2 | `admin-door` | The secret door link: answers `302` to the admin area and sets an `sf_door` cookie for 24 hours. |
+| 3 | `banned-ips` | Blocks this project's bans plus the shared attacker list (herd immunity). |
+| 4 | `decoys-env`, `decoys-aws` | Serves fake `.env` and AWS credential files (HTTP 200) holding a honey key. |
+| 5 | `robots` | Serves a `robots.txt` whose `Disallow:` lines are traps (only when the app has no `robots.txt`). |
+| 6 | `tripwire` | Paths only scanners request, plus the robots.txt trap folders. Answers `404`; the monitor bans the IP. |
+| 7 | `admin-lockdown` | Admin routes answer `404` unless the visitor's IP is allow-listed or carries the door cookie. |
+| 8 | `bot-challenge` | AWS WAF Challenge (silent JavaScript proof-of-work) on HTML page loads: login pages or all pages. |
+| 9 | `login-rate-limit` | Per-IP limit on login, auth, token, and admin routes found in the source (100 per 5 minutes by default, self-tuned). |
+| 10 | `global-rate-limit` | Per-IP limit on everything (2,000 per 5 minutes by default, self-tuned). |
+| 11–14 | AWS managed groups | IP reputation, known bad inputs, OWASP core (its 8 KB body limit is count-only so uploads work), SQL injection. |
+
+The tripwire list is **code-aware**: it leaves out any path the app itself serves, such as WordPress paths for PHP apps, `/actuator/` for Spring, and routes found in the source. Decoys never shadow a path the app serves either.
+
+**Under Attack mode** tightens limits to 300 per 5 minutes globally and 20 on login routes, and challenges every HTML page load. Switch it on by hand, or let automatic incident response do it during an attack spike; it switches itself off after an hour of calm. The **attack dashboard** summarizes blocked and challenged requests sampled over the last 3 hours by rule, attacker IP, country, and targeted path.
+
+### The 21 attack-prevention features
+
+#### 1. Deception honeypots: fake `.env` with a canary key
+
+Scanners hunt for `/.env`, `/.env.production`, `/.aws/credentials` and similar. SkyForge serves them a believable fake file with a fake database URL, JWT secret, SMTP password, and a **real AWS key with no permissions** (the honey credential, see #15).
+
+- **ECS (Protected):** firewall custom responses (`decoys-env`, `decoys-aws`). The request also counts as a tripwire hit, so the IP is banned within about 10 minutes.
+- **S3 sites (any tier):** the decoy files are uploaded next to the site.
+- Paths the app serves itself are never replaced with a decoy.
+
+#### 2. Security gate before traffic switches
+
+Before anything is built, the code scan runs; after the image is pushed to ECR, SkyForge waits up to 90 seconds for the vulnerability scan. Only then does the new version receive traffic.
+
+| Gate setting | Critical code findings (keys, private keys) or critical image CVEs |
+|---|---|
+| Off | ignored |
+| **Warn** (default) | logged in the deployment console, deployment continues |
+| Block | deployment stops before the new version gets traffic; a `gate.blocked` incident is raised |
+
+#### 3. Code-aware outbound firewall
+
+The app's ECS security group normally lets the container connect anywhere. With the outbound firewall on, it may only connect out on the TCP ports the code needs, plus DNS (53) and NTP (123):
+
+- always 80 and 443 (APIs, AWS, package CDNs);
+- ports from connection strings in environment values (`postgres://` → 5432, `rediss://host:6390` → 6390, and so on);
+- ports for libraries found in the code (nodemailer/smtplib → 587/465/25, ioredis → 6379, mongoose → 27017, mysql2 → 3306, amqplib → 5672, kafkajs → 9092).
+
+A compromised container then cannot open reverse shells on arbitrary ports or reach crypto-mining pools. Security-group changes apply to running tasks immediately, so turning it on or off needs no redeploy.
+
+#### 4. Admin lockdown
+
+List IP addresses or CIDR ranges. Admin routes (`/admin` plus admin-looking routes found in the source, such as `/backoffice` or `/staff`) answer `404` to everyone else. The allowlist is a separate WAF IP set (`<app>-admin-allow`), removed as soon as the list is empty.
+
+#### 5. Bot challenge
+
+AWS WAF's **Challenge** action: a silent JavaScript proof-of-work that browsers pass automatically and headless scripts fail. Only requests whose `Accept` header includes `text/html` are challenged, so APIs, mobile apps, health checks, and assets keep working. A solved challenge is remembered for an hour. Options: off, login pages, or all pages (Under Attack mode always uses all pages).
+
+#### 6. Automatic incident response with alerts
+
+Every signal becomes an **incident** (`server/services/incidentService.js`):
+
+1. It is de-duplicated, so the same signal is not reported twice within its window.
+2. An **automatic response** runs when the project allows it (on by default).
+3. A plain-language summary is written by Gemini when `GEMINI_API_KEY` is set, otherwise by a built-in playbook.
+4. The incident is sent to every alert channel at or above the minimum severity.
+5. It appears on the Security page with what SkyForge did, and can be marked resolved.
+
+| Incident | Severity | Automatic response |
+|---|---|---|
+| Canary key used (`canary.used`) | critical | Under Attack mode for 2 hours (Protected) |
+| Honey key used (`honey.used`) | high | none needed: the key has no permissions |
+| Decoy taken / tripwire ban (`decoy.taken`, `ip.banned`) | medium / low | IPs banned for 24 hours and shared with your other projects |
+| Attack spike: 300+ blocked requests in an hour, counted by CloudWatch (`attack.spike`) | high | Under Attack mode; switches off automatically after an hour of calm (`attack.calm`) |
+| Site down: 3 failed health checks (`site.down`) | high | Restarts the containers once; `site.recovered` when it is back |
+| Secret visible on the site (`leak.detected`) | critical | Optional: take the site offline |
+| Secret pushed to the repository (`secret.pushed`) | critical | alert |
+| New vulnerability in a dependency (`cve.new`) | per CVE | alert |
+| Attack surface grew (`surface.changed`) | medium / low | alert |
+| Over budget (`wallet.budget`) | high | Under Attack mode; optional hard stop (offline) at 150% |
+| Deployment blocked by the gate (`gate.blocked`) | high | the deployment never received traffic |
+| New admin door link (`door.rotated`) | info | always delivered, regardless of minimum severity |
+| Red-team findings (`redteam.findings`) | high / medium | alert |
+
+**Alert channels.** Enter only what each channel needs:
+
+| Channel | You provide |
+|---|---|
+| Email | SMTP host, port, username, password (an app password for Gmail), recipients |
+| Slack | an Incoming Webhook URL (`https://hooks.slack.com/services/...`) |
+| Discord | a channel webhook URL (`https://discord.com/api/webhooks/...`) |
+| Telegram | a bot token from @BotFather and a chat ID |
+| Custom webhook | an HTTPS URL; optional signing secret (`x-skyforge-signature: sha256=<HMAC of the body>`) |
+
+All secret fields are encrypted at rest and shown masked. Webhook URLs must be HTTPS and resolve to public addresses. **Send test** checks each channel.
+
+#### 7. Self-tuning rate limits
+
+Every 6 hours SkyForge samples the requests the firewall allowed and reads CloudWatch's `AllowedRequests` for the last 3 days. It estimates the busiest legitimate visitor's peak 5-minute rate and sets the per-IP limits to **3×** that:
+
+- the global limit stays between 500 and 20,000;
+- the login limit stays between 30 and 500.
+
+It needs at least 20 sampled requests; until then the defaults stay (shown as "learning"). The firewall is only updated when a limit moves by more than 20%. Under Attack mode always overrides the tuned limits.
+
+#### 8. New-CVE alerts via OSV
+
+At each deployment SkyForge reads the exact package versions from lockfiles and manifests:
+
+- `package-lock.json` (or `package.json`);
+- `requirements*.txt`, `poetry.lock`, `Pipfile.lock`;
+- `go.mod`, `Gemfile.lock`, `composer.lock`, `Cargo.lock`.
+
+Once a day it queries [OSV.dev](https://osv.dev) (`/v1/querybatch`, free, no key). The first check reports what is already known; later checks alert only on **newly published** vulnerabilities, with the package, version, advisory ID and severity.
+
+#### 9. Push-time secret detection
+
+Every 10 minutes SkyForge lists new commits on the deployed branch through the GitHub API (no public URL or webhook needed). It scans the **added lines** of each diff for AWS, Stripe, GitHub, Slack, Google keys and private keys, and flags newly committed `.env`, `.pem`, `.p12`, `id_rsa` and service-account files (`.env.example` and similar templates are allowed). Bots scrape public pushes within minutes, so the alert tells you to revoke the key, not just delete the commit.
+
+#### 10. Tamper-proof (read-only) containers
+
+With this on, the ECS task runs with `readonlyRootFilesystem: true`. Writable scratch space is mounted at `/tmp`, `/var/tmp`, `/run`, and `/var/cache/nginx`. The task also drops `NET_RAW` and runs an init process. Attackers cannot drop web shells or modify the app's code at runtime.
+
+This is opt-in. If the app fails to start read-only, SkyForge redeploys it with a writable filesystem in the same deployment and logs why. An app that starts fine but writes inside its own folder at runtime (for example a SQLite database file) will have those writes fail, so leave this off for such apps.
+
+#### 11. Secret-aware response firewall (leak watch)
+
+Every 6 hours, and after every deployment, SkyForge fetches the site's home page, common config and debug paths (`/config.js`, `/env.js`, `/api/config`, `/debug`, …) and up to 15 same-origin JavaScript bundles. It looks for:
+
+- the **actual values** of the project's secrets (environment variables named like `*SECRET*`, `*PASSWORD*`, `*TOKEN*`, `*_KEY`, `DATABASE_URL`, …);
+- provider key formats (AWS, Stripe, GitHub, Slack, Google, private keys);
+- the canary key.
+
+Values are compared in memory and never logged; findings name the variable and the URL. The most common cause is a frontend build that inlined a server-side variable. With **Take the site offline when a secret leaks** on, the automatic response switches to the maintenance page until you rotate the secret.
+
+This is a scheduled scanner, not an inline proxy: responses are not rewritten in flight.
+
+#### 12. Herd immunity: shared ban list across projects
+
+Every IP banned on any project (tripwire or decoy) is recorded in the `ThreatIntel` table. Each Protected project's ban list also contains attacker IPs seen by **other** projects in the last 7 days (up to 3,000), so a scanner that hits one site is already blocked on the next. Unbanning an IP also removes it from the shared list.
+
+#### 13. Blast-radius map
+
+**Blast-radius map** answers "if an attacker fully controlled this container, what could they reach?":
+
+- the secrets in its environment;
+- data stores named in its configuration;
+- the AWS actions its task role allows (inline and attached policies, read from IAM);
+- whether its outbound network is restricted;
+- whether the canary would reveal the theft.
+
+It produces a score, a level (low, medium, high), and concrete advice, such as replacing wildcard permissions with the code-derived policy (#14).
+
+#### 14. AWS permissions generated from the code
+
+At each deployment SkyForge reads the AWS SDK calls in the source: JavaScript v3 command imports, the v2 `new AWS.S3()` style, and Python `boto3`. It turns them into a least-privilege IAM policy:
+
+- `PutObjectCommand` becomes `s3:PutObject`;
+- `ListObjectsV2` becomes `s3:ListBucket`;
+- `send_email` becomes `ses:SendEmail`;
+- S3 actions are scoped to bucket names found in `*BUCKET*` environment variables.
+
+With **AWS permissions generated from the code** on, this policy is attached to the task role as the inline policy `SkyForgeCodePermissions`, so the container can do exactly what the code does and nothing more. If no SDK calls are found, the role keeps no permissions at all. The policy is removed when the switch is off, and deleted with the role on destroy.
+
+#### 15. Honey credentials
+
+A second IAM user, `<app>-honey`, with **no permissions**. Its key appears only inside decoy files (#1). Nobody legitimate has ever seen it, so any use of it proves an attacker downloaded a decoy and tried it. AWS records when, where (region) and against which service, which the incident includes. Checked every 10 minutes; deleted on destroy. Your real secrets were never in the decoy.
+
+#### 16. `robots.txt` bait
+
+When the app has no `robots.txt` of its own, SkyForge serves one that "hides" `/admin-backup/`, `/internal/export/`, `/db-dumps/`, `/old-site/` and `/private-api/`. Well-behaved crawlers obey it and never visit; scanners read it to find hidden areas, and those folders are tripwires, so visiting them gets the IP banned. On S3 sites the file is uploaded with the site.
+
+#### 17. Attack replay
+
+**Replay blocked attacks** takes the paths of the requests the firewall blocked in the last 3 hours and re-sends them (GET only, at most 40) to the live app **with the scanner header**, so the firewall lets them through. The result shows, per attack, whether the app itself would have been vulnerable without the firewall: it looks for system files, credentials, environment dumps, stack traces, SQL errors, `phpinfo` and directory listings.
+
+The replay goes to the live site, not a separate copy, which is why it only replays read-only GET requests, never sends bodies, and skips any path that looks state-changing (`/delete`, `/update`, `/logout`, `/reset`, and similar), because some apps change data on GET.
+
+#### 18. Attack-surface diff for every deploy
+
+Each deployment records the app's attack surface:
+
+- all routes, plus admin, login, debug and upload routes;
+- environment variable names;
+- dependencies;
+- outbound ports;
+- AWS actions used by the code;
+- the listening port.
+
+It is compared with the previous deployment. New admin, debug, upload or login routes, new AWS permissions, and new outbound ports are highlighted in the deployment log and on the Security page. Medium- and high-risk changes raise a `surface.changed` incident. The last 15 deployments' changes are kept.
+
+#### 19. Denial-of-wallet guard
+
+Set a monthly budget. Every hour SkyForge projects the month's bill from the last 24 hours of traffic. The estimate is approximate and ignores the free tier. It counts:
+
+- **fixed costs:** ALB, the Fargate task's vCPU and memory, and the WAF web ACL and rules;
+- **traffic costs:** ALB LCUs, data transfer, WAF requests, and CloudFront requests and bytes;
+- **traffic data:** CloudWatch `AWS/ApplicationELB` and `AWS/CloudFront` metrics.
+
+When the projection passes the budget, SkyForge acts:
+
+- **At 80% of budget:** a warning.
+- **Over budget:** a high-severity incident, and Under Attack mode switches on to cut abusive traffic (Protected tier).
+- **At 150% with Hard stop on:** the site is taken offline.
+
+S3 website hosting publishes no free request metrics, so for those sites the estimate covers storage only.
+
+#### 20. AI red-team rehearsal
+
+**AI red-team rehearsal** plans an attack against your own site and runs it safely:
+
+1. **Planning.** Gemini (or a built-in planner when no key is set) reads the routes found in the code and picks up to 20 targets where a real attacker would look first.
+2. **The probes.** It runs a fixed catalogue of read-only probes:
+   - unauthenticated access to admin and account routes;
+   - insecure direct object references (`/api/users/1` vs `/2`);
+   - open redirects on login routes;
+   - reflected input;
+   - verbose errors on malformed input;
+   - CORS that trusts any origin with credentials;
+   - `TRACE`;
+   - public API docs, GraphQL introspection and debug consoles.
+3. **Limits.** Every request is GET, HEAD or OPTIONS, sequential, at most 80 per run, and goes only to the project's own URL. Routes that look state-changing (`/delete`, `/update`, `/add`, `/logout`, `/reset`, and similar) are removed from the plan and blocked at request time, whoever planned them, because some apps change data on GET.
+
+Findings come with a fix and raise a `redteam.findings` incident.
+
+#### 21. Rotating admin door
+
+With the door on, admin routes answer `404` to everyone. Opening the secret link `https://<site>/__skyforge/door/<token>` makes the firewall redirect into the admin area and set an `HttpOnly` cookie valid for 24 hours. The token is 32 random characters and **rotates every 24 hours**. The new link is sent to every alert channel and shown on the Security page; **Rotate now** forces a new one. Combined with the admin lockdown (#4), either an allow-listed IP or the door gets in.
 
 ### Always on
 
-- **Security headers.** nginx-served sites send `X-Frame-Options`, `X-Content-Type-Options`, `Referrer-Policy`, and `Permissions-Policy`, and hide the nginx version.
+- **Security headers.** nginx-served sites send `X-Frame-Options`, `X-Content-Type-Options`, `Referrer-Policy`, and `Permissions-Policy`, and hide the nginx version. CloudFront distributions use AWS's managed security-headers policy.
 - **ALB hardening.** `drop_invalid_header_fields` guards against request smuggling.
-- **AWS Shield Standard.** Network-level DDoS protection on every ALB.
+- **AWS Shield Standard.** Network-level DDoS protection on every ALB and CloudFront distribution.
 - **Network isolation.** Tasks accept traffic only from the ALB security group.
 - **Secrets handling.** Secrets are stored in Secrets Manager. Credential files are stripped from images.
 
@@ -341,25 +573,26 @@ On the first deployment, SkyForge creates an IAM user named `<app>-canary` with 
 
 1. **Snapshot.** Records every resource manifest for the project's deployments.
 2. **Delete, in dependency order.**
-   - WAF web ACL (detached from the ALB first) and its ban list; the canary IAM user and keys.
+   - WAF web ACL (detached from the ALB first), its ban list and admin allowlist; the CloudFront-scope firewall (after its distribution is gone); the canary and honey-credential IAM users and keys.
    - ECS service: SkyForge waits until the tasks have fully stopped. Then the cluster.
    - Listeners, the ALB, and the target group.
    - Security groups: retried for up to 10 minutes while AWS releases network interfaces.
-   - Log group, Secrets Manager secret, IAM roles, and task definitions.
+   - Log group, Secrets Manager secret, IAM roles (inline policies such as the code-derived permissions are deleted first), and task definitions.
    - The ECR repository and all its images.
 3. **Verified sweep.** SkyForge searches AWS for **anything named for the project**, including resources a crashed or interrupted operation never recorded:
    - ECS cluster, service, and task definitions;
    - ALB and target group;
    - security groups and IAM roles;
    - log group and secret;
-   - WAF ACL and IP set;
-   - canary user;
+   - WAF ACLs and IP sets in both scopes (REGIONAL and CLOUDFRONT);
+   - canary and honey-credential users;
+   - S3 bucket, CloudFront distributions, and origin access controls;
    - ECR repository.
 
    It deletes whatever it finds and checks again.
 4. **Success only when AWS confirms nothing remains:** *"Verified with AWS: no resources for this project remain, so it no longer incurs charges."* If something survives, teardown fails and lists exactly what is left. **Retry Teardown** is idempotent.
 
-The local build workspace is removed, and the project's security state is reset.
+The local build workspace is removed, and the project's security state is reset. Your protection settings (the switches on the Security page) are kept for the next deployment.
 
 ---
 
@@ -370,7 +603,17 @@ The monitor worker runs every minute for each live deployment. It:
 - probes the site's health path and records the latency and health status;
 - skips the probe while the site is offline;
 - completes **Bring online** once the container is healthy;
-- about every 10 minutes, syncs WAF tripwire bans (with unbanned IPs exempt for 24 hours) and checks the canary.
+- records health incidents: after 3 failed probes a `site.down` incident (with one automatic container restart), and `site.recovered` when it answers again;
+- runs the scheduled security automation in the background (`server/services/securityAutomation.js`), each task at its own pace:
+
+| Every | Task |
+|---|---|
+| 10 minutes | Bans from tripwires and decoys (plus the shared attacker list; unbanned IPs stay exempt for 24 hours), canary and honey-key checks, attack-spike detection and automatic Under Attack mode, push-time secret scan |
+| 1 hour | Denial-of-wallet cost projection |
+| 6 hours | Self-tuning rate limits, leak watch |
+| 24 hours | OSV CVE check, admin-door rotation |
+
+**Run all checks now** on the Security page runs every task immediately.
 
 Each check schedules the next, keyed by minute so that duplicate chains merge. When a worker starts, it **re-seeds monitoring for every live site**, so restarts never leave a site unwatched.
 
@@ -450,7 +693,10 @@ The Settings screen offers two ways to connect:
 
 - `wafv2:*` web ACL and IP set actions;
 - `elasticloadbalancing:SetWebAcl`, `ModifyLoadBalancerAttributes`, and `CreateRule`/`DeleteRule`/`DescribeRules`;
-- IAM user and access-key actions for the canary;
+- IAM user and access-key actions for the canary and honey credentials;
+- `iam:ListRolePolicies` and `iam:GetRolePolicy` for the blast-radius map;
+- `ec2:AuthorizeSecurityGroupEgress` and `RevokeSecurityGroupEgress` for the outbound firewall;
+- `cloudwatch:GetMetricStatistics` for attack-spike detection, self-tuning limits, and the denial-of-wallet guard;
 - ECR image scanning actions;
 - `logs:GetLogEvents`.
 
@@ -481,6 +727,9 @@ All server settings live in `server/.env`, which is loaded by `server/config/env
 | `DESTROY_VERIFY_ATTEMPTS`, `CLOUDFRONT_WAIT_SECONDS` | Teardown verification and how long to wait for CloudFront distributions to disable |
 | `DEPLOYMENT_WORKER_CONCURRENCY` | Parallel deployments per worker |
 | `TRUST_PROXY`, `SERVE_CLIENT`, `LOG_REDIS_ERRORS` | Reverse-proxy trust, serving `client/dist` from the API, Redis error logging |
+| `ATTACK_SPIKE_THRESHOLD` | Blocked requests per hour that count as an attack spike (default 300) |
+
+`CLIENT_URL` is also used for the "open in SkyForge" link in alerts. Alert channels need no server configuration: each user enters their own on the Settings page.
 
 The client reads `VITE_API_ORIGIN`. Leave it empty when the client and API share an origin.
 
@@ -498,8 +747,10 @@ All routes are under `/api`, and all except auth and the OAuth callback require 
 | Projects | `POST /projects`, `GET /projects`, `GET /projects/:id`, `DELETE /projects/:id` |
 | Plan and environment | `GET\|POST /projects/:id/plan`, `POST /projects/:id/env` (values + `ignoredEnv`), `POST /projects/:id/env/scan` |
 | Docker | `GET /projects/:id/docker`, `POST /projects/:id/docker/strategy`, `POST /projects/:id/docker/validate`, `POST /projects/:id/docker/save` |
-| Infrastructure | `GET /projects/:id/infrastructure` |
-| Security | `GET /projects/:id/security`, `POST /projects/:id/security/tier`, `POST /projects/:id/security/scan`, `POST /projects/:id/security/under-attack`, `POST /projects/:id/security/unban`, `POST /projects/:id/security/fix` |
+| Infrastructure | `GET /projects/:id/infrastructure`, `POST /projects/:id/infrastructure/target` |
+| Security | `GET /projects/:id/security`, `POST /projects/:id/security/tier`, `POST /projects/:id/security/settings`, `POST /projects/:id/security/scan`, `POST /projects/:id/security/under-attack`, `POST /projects/:id/security/unban`, `POST /projects/:id/security/fix` |
+| Incidents and tools | `GET /projects/:id/security/incidents`, `POST /projects/:id/security/incidents/:incidentId/resolve`, `POST /projects/:id/security/checks`, `POST /projects/:id/security/door/rotate`, `POST /projects/:id/security/replay`, `POST /projects/:id/security/redteam`, `GET /projects/:id/security/blast-radius`, `GET /projects/:id/security/cost` |
+| Alerts | `GET /alerts`, `PUT /alerts`, `POST /alerts/test` |
 | Site availability | `POST /projects/:id/site/offline`, `POST /projects/:id/site/online` |
 | Deployments | `POST /deployments/project/:projectId`, `GET /deployments/project/:projectId`, `GET /deployments/:id`, `GET /deployments/:id/logs/stream` (SSE), `GET /deployments/:id/queue-position`, `POST /deployments/:id/retry`, `POST /deployments/:id/rollback`, `POST /deployments/project/:projectId/destroy` |
 | Health | `GET /healthz`, `GET /readyz` |
@@ -512,12 +763,13 @@ All routes are under `/api`, and all except auth and the OAuth callback require 
 client/src/
   pages/            Dashboard, Projects, DeploymentPlan (environment), DockerPreview,
                     InfrastructurePreview, DeploymentConsole, Security, Settings, ...
-  components/       EnvironmentWizard, RepositoryIntelligence*, Card, Button, ...
+  components/       EnvironmentWizard, TargetChooser, AlertSettingsCard, SecurityPanels,
+                    RepositoryIntelligence*, Card, Button, ...
   services/api.js   API client
 server/
   config/           env loader, Prisma client
   controllers/      auth, github, aws, project, planning, docker, infrastructure,
-                    deployment, security
+                    deployment, security, alert
   services/
     buildPlanner.js     source → app root, runtime, entry point, port
     templateEngine.js   Dockerfile generation (templates/docker/*)
@@ -526,9 +778,18 @@ server/
     ecsService.js       ECS/ALB provisioning, offline/online, discovery sweep
     ecrService.js       ECR push and image scanning
     securityScanner.js  code scan, self-pentest, scoring, route extraction
-    securityService.js  tiers, canary, firewall orchestration, reports
-    wafService.js       AWS WAF rules, bans, attack summary
-    canaryService.js    canary IAM credentials
+    securityService.js  tiers, settings, canary/honey keys, firewall + decoys, leak watch, reports
+    wafService.js       AWS WAF rules (both scopes), bans, herd list, attack summary
+    canaryService.js    canary and honey IAM credentials
+    deceptionService.js decoy files, robots.txt bait, door tokens
+    securityPolicy.js   egress ports, code-derived IAM, dependencies, attack surface, pushed secrets
+    deploySecurity.js   security gate, code analysis and hardening inside the pipeline
+    securityAutomation.js  scheduled checks: spikes, tuning, door, leaks, CVEs, pushes, cost, health
+    incidentService.js  incidents, automatic response, AI summaries, alert fan-out
+    alertService.js     Email, Slack, Discord, Telegram, and webhook channels
+    redTeamService.js   AI red team, attack replay, blast radius
+    staticDeployer.js   S3 + CloudFront releases, decoys, CloudFront WAF attachment
+    cloudfrontEdgeService.js  CloudFront in front of the ALB
     fixPullRequest.js   deterministic and AI fixes as GitHub branches and pull requests
     destroyService.js   teardown and verified sweep
     healthService.js    SSRF-safe HTTP probes and DNS wait
@@ -557,7 +818,9 @@ The test suites cover:
 - build planning across stacks;
 - environment-variable classification;
 - Dockerfile templates;
-- WAF rule generation;
+- WAF rule generation, including decoys, the admin door, lockdown, challenges, and forwarded-IP rules;
+- outbound ports, code-derived IAM policies, dependency parsing, attack-surface diffs, and pushed-secret detection;
+- self-tuning limits, cost projection, alert validation and formatting, and the blast radius;
 - the code scan and deterministic fixes;
 - route extraction;
 - a self-pentest against a deliberately vulnerable local server;
@@ -570,7 +833,12 @@ CI installs from both lockfiles, applies migrations to an empty PostgreSQL datab
 ## Limitations
 
 - **HTTPS.** The plain ECS Fargate target serves HTTP on the ALB address. The CloudFront targets give free HTTPS, but some new AWS accounts must ask AWS Support to enable CloudFront; until then they fall back to HTTP. The security report flags HTTP-only sites.
-- **WAF on S3 sites.** The Protected tier attaches a regional WAF to the ALB, so it does not yet cover S3 + CloudFront sites (a CloudFront-scope WAF is planned).
+- **A firewall on S3 sites needs CloudFront.** S3 + CloudFront sites get a CLOUDFRONT-scope firewall, but while CloudFront is unavailable on the account the site runs on S3 website hosting, which cannot have a firewall. Decoys, leak watch, and scanning still apply.
+- **CloudFront paths not yet run end to end.** The CloudFront firewall attachment and CloudFront cost metrics are built on the AWS APIs but could not be exercised on an account where CloudFront is still blocked.
+- **Leak watch is a scanner, not an inline proxy.** It checks pages and bundles every 6 hours and after each deploy; it does not rewrite responses in flight.
+- **Attack replay and the red team run against the live site,** with read-only requests only (routes that look state-changing, such as `/delete` or `/logout`, are never requested), rather than against a separate copy.
+- **Honey and canary detection delay.** AWS updates "access key last used" with some delay (usually minutes, occasionally hours), so those alerts are not instant.
+- **The read-only filesystem is opt-in.** If the app cannot start that way, SkyForge redeploys it writable. An app that starts but writes to its own folder at runtime (for example a SQLite file) will see those writes fail; leave the setting off for such apps.
 - **SPA deep links in S3 website mode** return status 404 while still serving the app, because S3 website hosting uses the error document. With CloudFront enabled they return 200.
 - **Databases are not provisioned.** SkyForge detects them and tells you what to set; you supply a hosted instance.
 - **Pattern-based detection.** Unusual setups can be missed, such as variables built at runtime or custom config loaders. The deploy-time check, the **Not needed** option, and Custom Dockerfiles cover the gaps.

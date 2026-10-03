@@ -21,6 +21,7 @@ import githubRoutes from "./routes/githubRoutes.js";
 import projectRoutes from "./routes/projectRoutes.js";
 import awsRoutes from "./routes/awsRoutes.js";
 import deploymentRoutes from "./routes/deploymentRoutes.js";
+import alertRoutes from "./routes/alertRoutes.js";
 import { encryptSecret } from "./services/secretService.js";
 import { closeActiveLogStreams } from "./services/logsService.js";
 
@@ -132,6 +133,7 @@ app.use("/api/github", githubRoutes);
 app.use("/api/projects", projectRoutes);
 app.use("/api/aws", awsRoutes);
 app.use("/api/deployments", deploymentRoutes);
+app.use("/api/alerts", alertRoutes);
 
 const clientDist = path.resolve(__dirname, "../client/dist");
 if (process.env.SERVE_CLIENT === "true" && fs.existsSync(clientDist)) {

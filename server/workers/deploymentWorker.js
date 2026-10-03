@@ -27,8 +27,10 @@ import { addMonitorJob } from "../queues/monitorQueue.js";
 import { scanDirectory, localhostWarnings } from "../services/envScanner.js";
 import { findAppRoot } from "../services/buildPlanner.js";
 import { collectSourceFiles } from "../services/envScanner.js";
-import { prepareCanary, applyProtection, buildSecurityReport } from "../services/securityService.js";
+import { prepareCanary, applyProtection, buildSecurityReport, patchProtection } from "../services/securityService.js";
 import { decryptObjectValues } from "../services/secretService.js";
+import { collectProjectSource, analyzeSource, codeGate, imageGate, hardeningFor, syncCodePermissions, refreshProject } from "../services/deploySecurity.js";
+import { runSecurityAutomation } from "../services/securityAutomation.js";
 
 const RUNNABLE_DEPLOYMENT_STATUSES = ["QUEUED", "BUILDING", "PUSHING", "PROVISIONING", "DEPLOYING", "HEALTH_CHECK"];
 const ACTIVE_DEPLOYMENT_STATUSES = ["QUEUED", "BUILDING", "PUSHING", "PROVISIONING", "DEPLOYING", "HEALTH_CHECK", "ROLLING_BACK", "DESTROYING", "DESTROY_FAILED"];
@@ -118,8 +120,7 @@ async function secureLiveDeployment(options) {
 }
 
 async function setSecuringMarker(projectId, value) {
-  const current = await prisma.project.findUnique({ where: { id: projectId }, select: { protection: true } });
-  await prisma.project.update({ where: { id: projectId }, data: { protection: { ...(current?.protection || {}), securingSince: value } } }).catch(() => {});
+  await patchProtection(projectId, { securingSince: value }).catch(() => {});
 }
 
 async function stillLive(deploymentId) {
@@ -130,10 +131,7 @@ async function stillLive(deploymentId) {
 async function secureLiveDeploymentSteps({ project, credentials, deploymentId, resources, liveUrl, imageDigest, sourceDir, target }) {
   const log = (message, level = "info") => emitDeploymentLog(deploymentId, { stage: "LIVE", message, level });
   await prisma.project.update({ where: { id: project.id }, data: { siteOffline: false } }).catch(() => {});
-  let sourceFiles = [];
-  try {
-    sourceFiles = collectSourceFiles(findAppRoot(sourceDir));
-  } catch {}
+  const sourceFiles = collectProjectSource(sourceDir);
   try {
     if (!(await stillLive(deploymentId))) return;
     const fresh = await prisma.project.findUnique({ where: { id: project.id } });
@@ -261,6 +259,14 @@ export async function processDeploymentJob(job) {
     await verifyEnvironment(project, sourceDir, deploymentId, { staticSite: target === TARGETS.S3_CLOUDFRONT });
     activeStep = "BUILDING";
     await updateStage(deploymentId, workerJobId, { status: "BUILDING", stage: "BUILDING", currentStep: "BUILDING" });
+    // Security gate and code analysis run before anything is built, so nothing unsafe ever ships.
+    const sourceFiles = collectProjectSource(sourceDir);
+    const securedProject = await refreshProject(project.id) || project;
+    await codeGate({ project: securedProject, sourceFiles, deploymentId });
+    const analysis = await analyzeSource({ project: securedProject, sourceFiles, deploymentId }).catch((analysisError) => {
+      emitDeploymentLog(deploymentId, { stage: "BUILDING", message: `[SECURITY] Code analysis skipped: ${String(analysisError.message).slice(0, 160)}`, level: "warn" });
+      return null;
+    });
 
     let deployResult;
     let imageDigest = null;
@@ -293,6 +299,8 @@ export async function processDeploymentJob(job) {
     };
     await updateStage(deploymentId, workerJobId, { resources });
     await assertNotCancelled(deploymentId, workerJobId);
+    await imageGate({ project: securedProject, credentials, repositoryName: pushed.repositoryName, imageDigest: pushed.imageDigest, deploymentId });
+    await assertNotCancelled(deploymentId, workerJobId);
     activeStep = "PROVISIONING";
     await updateStage(deploymentId, workerJobId, { status: "PROVISIONING", stage: "PROVISIONING", currentStep: "PROVISIONING" });
     emitDeploymentLog(deploymentId, { stage: "PROVISIONING", message: "[ECS] Provisioning task definition, service, load balancer, and target group.", level: "info" });
@@ -301,13 +309,34 @@ export async function processDeploymentJob(job) {
     const securityLog = (message, level = "info") => emitDeploymentLog(deploymentId, { stage: "DEPLOYING", message, level });
     const canary = await prepareCanary({ project, credentials, log: securityLog });
     if (canary.canary) await persistResources({ canaryUserName: canary.canary.userName });
-    deployResult = await deployToEcs({
-      deploymentId,
-      project: runtimeProject,
-      credentials,
-      imageUri: pushed.ecrUri,
-      onResources: persistResources,
-      extraEnvironment: canary.env,
+    const hardening = hardeningFor(securedProject, analysis);
+    if (hardening.readOnlyRoot) emitDeploymentLog(deploymentId, { stage: "DEPLOYING", message: "[SECURITY] Tamper-proof mode: the container filesystem is read-only (writable scratch space only in /tmp, /var/tmp, /run, /var/cache/nginx).", level: "info" });
+    try {
+      deployResult = await deployToEcs({
+        deploymentId,
+        project: runtimeProject,
+        credentials,
+        imageUri: pushed.ecrUri,
+        onResources: persistResources,
+        extraEnvironment: canary.env,
+        hardening,
+      });
+    } catch (hardenedError) {
+      if (!hardening.readOnlyRoot || /cancel|superseded/i.test(String(hardenedError.code || hardenedError.message))) throw hardenedError;
+      // Some apps write to their own directories; keep the site working and tell the owner.
+      emitDeploymentLog(deploymentId, { stage: "DEPLOYING", message: `[SECURITY] The app did not start with a read-only filesystem (${String(hardenedError.message).slice(0, 160)}). Redeploying with a writable filesystem; the outbound firewall stays as configured.`, level: "warn" });
+      deployResult = await deployToEcs({
+        deploymentId,
+        project: runtimeProject,
+        credentials,
+        imageUri: pushed.ecrUri,
+        onResources: persistResources,
+        extraEnvironment: canary.env,
+        hardening: { ...hardening, readOnlyRoot: false },
+      });
+    }
+    await syncCodePermissions({ project: securedProject, credentials, analysis, deploymentId }).catch((permissionError) => {
+      emitDeploymentLog(deploymentId, { stage: "DEPLOYING", message: `[IAM] Code-derived permissions not applied: ${String(permissionError.message).slice(0, 160)}`, level: "warn" });
     });
     imageDigest = pushed.imageDigest;
     await assertNotCancelled(deploymentId, workerJobId);
@@ -370,6 +399,8 @@ export async function processDeploymentJob(job) {
     }
     emitDeploymentLog(deploymentId, { stage: "LIVE", message: `[LIVE] Application is live at ${deployResult.endpoint}`, level: "success" });
     await secureLiveDeployment({ project, credentials, deploymentId, resources, liveUrl: deployResult.endpoint, imageDigest, sourceDir, target });
+    // Baseline the watchers (known CVEs, latest commit, cost) in the background.
+    void runSecurityAutomation({ projectId, credentials, resources, liveUrl: deployResult.endpoint, deploymentId, only: ["cve", "push", "wallet"] }).catch(() => {});
     try {
       await persistDeploymentLogs(deploymentId, getDeploymentLogs(deploymentId));
     } catch (logsError) {

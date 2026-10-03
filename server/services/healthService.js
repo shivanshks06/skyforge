@@ -18,7 +18,7 @@ function mappedIpv4Address(value) {
   return [high >> 8, high & 0xff, low >> 8, low & 0xff].join(".");
 }
 
-function isPrivateAddress(address) {
+export function isPrivateAddress(address) {
   const value = normalizedHostname(address);
   const version = net.isIP(value);
   if (version === 4) {

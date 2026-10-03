@@ -260,10 +260,13 @@ export async function destroyProjectInfrastructure({ projectId, deploymentId, us
       },
     });
     await markProjectDestroyedIfCurrent(projectId, operation.id);
-    // Security state referred to the deleted resources; keep only the scanner token.
+    // Security state referred to the deleted resources; keep only the scanner token and the owner's
+    // feature settings (re-read: the project row may have changed during the teardown).
+    const latest = await prisma.project.findUnique({ where: { id: projectId }, select: { protection: true } }).catch(() => null);
+    const kept = Object.fromEntries(Object.entries(latest?.protection || project.protection || {}).filter(([key]) => ["scanToken", "settings"].includes(key)));
     await prisma.project.update({
       where: { id: projectId },
-      data: { siteOffline: false, protection: project.protection?.scanToken ? { scanToken: project.protection.scanToken } : null },
+      data: { siteOffline: false, protection: Object.keys(kept).length ? kept : null },
     }).catch(() => {});
     emitDeploymentLog(operation.id, { stage: "DESTROY_COMPLETE", message: "[DESTROY] All snapshotted project resources were removed and verified.", level: "success" });
     return { success: true, status: "DESTROYED", deploymentId: operation.id };

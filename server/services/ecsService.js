@@ -46,6 +46,8 @@ import {
   DescribeVpcsCommand,
   DescribeManagedPrefixListsCommand,
   RevokeSecurityGroupIngressCommand,
+  AuthorizeSecurityGroupEgressCommand,
+  RevokeSecurityGroupEgressCommand,
 } from "@aws-sdk/client-ec2";
 import {
   IAMClient,
@@ -53,6 +55,7 @@ import {
   CreateRoleCommand,
   DeleteRoleCommand,
   DeleteRolePolicyCommand,
+  ListRolePoliciesCommand,
   DetachRolePolicyCommand,
   GetRoleCommand,
   PutRolePolicyCommand,
@@ -198,6 +201,55 @@ async function ensureSecurityGroup(ec2, network, groupName, description, ingress
   }
   emitDeploymentLog(deploymentId, { stage: "PROVISIONING", message: `[ECS] Reconciled security group ${groupName}.`, level: "info" });
   return groupId;
+}
+
+const ALL_EGRESS = { IpProtocol: "-1", IpRanges: [{ CidrIp: "0.0.0.0/0" }] };
+const sameEgress = (a, b) => a.IpProtocol === b.IpProtocol && (a.FromPort ?? null) === (b.FromPort ?? null) && (a.ToPort ?? null) === (b.ToPort ?? null);
+
+/**
+ * Outbound firewall for the app's tasks. `ports` null restores AWS's default allow-all egress;
+ * otherwise only those TCP ports (plus DNS and NTP) may leave the container, so a compromised app
+ * cannot open reverse shells or reach mining pools on arbitrary ports.
+ */
+async function reconcileTaskEgress(ec2, groupId, ports, deploymentId) {
+  const described = await ec2.send(new DescribeSecurityGroupsCommand({ GroupIds: [groupId] }));
+  const current = (described.SecurityGroups?.[0]?.IpPermissionsEgress || []).map((permission) => ({
+    IpProtocol: permission.IpProtocol, FromPort: permission.FromPort, ToPort: permission.ToPort,
+    IpRanges: permission.IpRanges?.length ? permission.IpRanges.map(({ CidrIp }) => ({ CidrIp })) : undefined,
+    Ipv6Ranges: permission.Ipv6Ranges?.length ? permission.Ipv6Ranges.map(({ CidrIpv6 }) => ({ CidrIpv6 })) : undefined,
+    UserIdGroupPairs: permission.UserIdGroupPairs?.length ? permission.UserIdGroupPairs.map(({ GroupId }) => ({ GroupId })) : undefined,
+  }));
+  const anywhere = [{ CidrIp: "0.0.0.0/0" }];
+  const desired = ports
+    ? [
+      ...[...new Set(ports.map(Number).filter((port) => Number.isInteger(port) && port > 0 && port < 65536))].sort((a, b) => a - b)
+        .map((port) => ({ IpProtocol: "tcp", FromPort: port, ToPort: port, IpRanges: anywhere })),
+      { IpProtocol: "udp", FromPort: 53, ToPort: 53, IpRanges: anywhere },
+      { IpProtocol: "tcp", FromPort: 53, ToPort: 53, IpRanges: anywhere },
+      { IpProtocol: "udp", FromPort: 123, ToPort: 123, IpRanges: anywhere },
+    ]
+    : [ALL_EGRESS];
+  const toRemove = current.filter((rule) => !desired.some((wanted) => sameEgress(rule, wanted)));
+  const toAdd = desired.filter((wanted) => !current.some((rule) => sameEgress(rule, wanted)));
+  // Add first so the tasks are never left with no egress at all.
+  if (toAdd.length) {
+    await ec2.send(new AuthorizeSecurityGroupEgressCommand({ GroupId: groupId, IpPermissions: toAdd })).catch((error) => {
+      if (error.name !== "InvalidPermission.Duplicate") throw error;
+    });
+  }
+  if (toRemove.length) {
+    const clean = toRemove.map((rule) => Object.fromEntries(Object.entries(rule).filter(([, value]) => value !== undefined)));
+    await ec2.send(new RevokeSecurityGroupEgressCommand({ GroupId: groupId, IpPermissions: clean })).catch((error) => {
+      if (error.name !== "InvalidPermission.NotFound") throw error;
+    });
+  }
+  if (toAdd.length || toRemove.length) {
+    emitDeploymentLog(deploymentId, {
+      stage: "PROVISIONING",
+      message: ports ? `[SECURITY] Outbound firewall: the app may only connect out on TCP ${desired.filter((rule) => rule.IpProtocol === "tcp" && rule.FromPort !== 53).map((rule) => rule.FromPort).join(", ")} (plus DNS/NTP).` : "[SECURITY] Outbound firewall off: the app may connect out on any port.",
+      level: "info",
+    });
+  }
 }
 
 async function ensureLoadBalancer(elbv2, network, names, deploymentId, securityGroupId) {
@@ -432,7 +484,12 @@ function taskSecretKeys(project) {
   return Object.keys(values).filter((key) => /^[A-Za-z_][A-Za-z0-9_]*$/.test(key) && values[key] !== undefined && values[key] !== null);
 }
 
-function taskDefinitionInput(project, imageUri, port, executionRoleArn, taskRoleArn, logGroupName, region, secret, extraEnvironment = {}) {
+// Writable scratch space for read-only containers (Fargate task storage, empty on start).
+export const READ_ONLY_WRITABLE_PATHS = ["/tmp", "/var/tmp", "/run", "/var/cache/nginx"];
+
+function taskDefinitionInput(project, imageUri, port, executionRoleArn, taskRoleArn, logGroupName, region, secret, extraEnvironment = {}, hardening = {}) {
+  const readOnly = hardening.readOnlyRoot === true;
+  const scratch = readOnly ? READ_ONLY_WRITABLE_PATHS.map((containerPath, index) => ({ name: `scratch-${index}`, containerPath })) : [];
   const cpu = String(project.cpu === "0.25 vCPU" ? 256 : project.cpu === "1 vCPU" ? 1024 : project.cpu === "2 vCPU" ? 2048 : 512);
   const memory = String(project.memory === "512 MB" ? 512 : project.memory === "2 GB" ? 2048 : project.memory === "4 GB" ? 4096 : 1024);
   return {
@@ -443,6 +500,7 @@ function taskDefinitionInput(project, imageUri, port, executionRoleArn, taskRole
     memory,
     executionRoleArn,
     taskRoleArn,
+    ...(scratch.length ? { volumes: scratch.map(({ name }) => ({ name })) } : {}),
     containerDefinitions: [{
       name: resourceNames(project).appName,
       image: imageUri,
@@ -453,6 +511,13 @@ function taskDefinitionInput(project, imageUri, port, executionRoleArn, taskRole
         .filter(([name]) => !secret?.keys?.includes(name))
         .map(([name, value]) => ({ name, value })),
       secrets: secret ? secret.keys.map((name) => ({ name, valueFrom: `${secret.arn}:${name}::${secret.versionId}` })) : [],
+      // Tamper-proof mode: the image filesystem cannot be modified at runtime (no web shells or
+      // persistent implants); raw sockets are removed and an init process reaps zombie processes.
+      ...(readOnly ? {
+        readonlyRootFilesystem: true,
+        mountPoints: scratch.map(({ name, containerPath }) => ({ sourceVolume: name, containerPath, readOnly: false })),
+        linuxParameters: { initProcessEnabled: true, capabilities: { drop: ["NET_RAW"] } },
+      } : {}),
       logConfiguration: {
         logDriver: "awslogs",
         options: {
@@ -475,7 +540,7 @@ async function describeService(ecs, cluster, service) {
   }
 }
 
-export async function deployToEcs({ deploymentId, project, credentials, imageUri, onResources, extraEnvironment = {} }) {
+export async function deployToEcs({ deploymentId, project, credentials, imageUri, onResources, extraEnvironment = {}, hardening = {} }) {
   const config = awsConfig(credentials);
   const region = credentials.region || process.env.AWS_REGION || "ap-south-1";
   const ecs = new ECSClient(config);
@@ -534,6 +599,7 @@ export async function deployToEcs({ deploymentId, project, credentials, imageUri
     deploymentId,
   );
   resources.taskSecurityGroupId = taskSecurityGroupId;
+  await reconcileTaskEgress(ec2, taskSecurityGroupId, hardening.egressPorts || null, deploymentId);
   await checkpoint();
   const loadBalancer = await ensureLoadBalancer(elbv2, network, names, deploymentId, albSecurityGroupId);
   resources.loadBalancerArn = loadBalancer.arn;
@@ -590,7 +656,7 @@ export async function deployToEcs({ deploymentId, project, credentials, imageUri
   let taskDefinition;
   for (let attempt = 1; attempt <= 10; attempt += 1) {
     try {
-      taskDefinition = await ecs.send(new RegisterTaskDefinitionCommand(taskDefinitionInput(project, imageUri, port, executionRoleArn, taskRoleArn, logGroupName, region, secret, extraEnvironment)));
+      taskDefinition = await ecs.send(new RegisterTaskDefinitionCommand(taskDefinitionInput(project, imageUri, port, executionRoleArn, taskRoleArn, logGroupName, region, secret, extraEnvironment, hardening)));
       break;
     } catch (error) {
       if ((error.name === "ClientException" || /role.*cannot be assumed|invalid execution role/i.test(error.message)) && attempt < 10) {
@@ -885,13 +951,21 @@ export async function destroyEcsResources({ credentials, resources, deploymentId
 
   // Protected-tier firewall and canary user must go before the load balancer they reference.
   const appName = resources.appName || (resources.clusterName || "").replace(/-cluster$/, "");
-  if (resources.webAclArn || resources.webAclId || resources.ipSetId) {
+  if (resources.webAclArn || resources.webAclId || resources.ipSetId || resources.wafLeftovers) {
     await deleteWebAcl({ credentials, appName, loadBalancerArn: resources.loadBalancerArn, webAclId: resources.webAclId, ipSetId: resources.ipSetId });
     emitDeploymentLog(deploymentId, { stage: "DESTROY", message: "[WAF] Firewall and ban list deleted.", level: "success" });
+  }
+  if (resources.cloudfrontWebAclId || resources.cloudfrontIpSetId || resources.cloudfrontWaf) {
+    await deleteWebAcl({ credentials, appName, scope: "CLOUDFRONT", webAclId: resources.cloudfrontWebAclId, ipSetId: resources.cloudfrontIpSetId });
+    emitDeploymentLog(deploymentId, { stage: "DESTROY", message: "[WAF] CloudFront firewall deleted.", level: "success" });
   }
   if (resources.canaryUserName) {
     await deleteCanary({ credentials, appName, userName: resources.canaryUserName });
     emitDeploymentLog(deploymentId, { stage: "DESTROY", message: "[CANARY] Canary IAM user and key deleted.", level: "success" });
+  }
+  if (resources.honeyUserName) {
+    await deleteCanary({ credentials, appName, userName: resources.honeyUserName });
+    emitDeploymentLog(deploymentId, { stage: "DESTROY", message: "[DECEPTION] Honey-credential IAM user and key deleted.", level: "success" });
   }
 
   if (resources.loadBalancerArn) {
@@ -934,7 +1008,14 @@ export async function destroyEcsResources({ credentials, resources, deploymentId
   if (resources.secretArn || resources.secretName) {
     await ignoreMissing(secrets.send(new DeleteSecretCommand({ SecretId: resources.secretArn || resources.secretName, ForceDeleteWithoutRecovery: true })));
   }
-  if (resources.taskRoleName) await ignoreMissing(iam.send(new DeleteRoleCommand({ RoleName: resources.taskRoleName })));
+  if (resources.taskRoleName) {
+    // Inline policies (such as the permissions generated from the code) must go before the role.
+    const inline = await iam.send(new ListRolePoliciesCommand({ RoleName: resources.taskRoleName })).catch(() => ({ PolicyNames: [] }));
+    for (const policyName of inline.PolicyNames || []) {
+      await ignoreMissing(iam.send(new DeleteRolePolicyCommand({ RoleName: resources.taskRoleName, PolicyName: policyName })));
+    }
+    await ignoreMissing(iam.send(new DeleteRoleCommand({ RoleName: resources.taskRoleName })));
+  }
   if (resources.executionRoleName) {
     await iam.send(new DeleteRolePolicyCommand({ RoleName: resources.executionRoleName, PolicyName: "SkyForgeSecretRead" })).catch((error) => {
       if (!isMissingResourceError(error)) throw error;
@@ -1164,16 +1245,27 @@ export async function discoverProjectResources({ credentials, project, repositor
     found.push(`Secrets Manager secret ${secretName} (billed monthly)`);
   }
   const waf = await findWafLeftovers({ credentials, appName: names.appName }).catch(() => ({}));
-  if (waf.webAcl || waf.ipSet) {
+  if (waf.webAcl || waf.ipSet || waf.allowSet) {
     manifest.webAclId = waf.webAcl?.Id;
     manifest.webAclArn = waf.webAcl?.ARN;
     manifest.ipSetId = waf.ipSet?.Id;
+    manifest.wafLeftovers = true;
     if (waf.webAcl) found.push(`WAF firewall ${waf.webAcl.Name} (billed monthly)`);
     if (waf.ipSet) found.push(`WAF ban list ${waf.ipSet.Name}`);
+    if (waf.allowSet) found.push(`WAF admin allowlist ${waf.allowSet.Name}`);
   }
-  if (await canaryExists({ credentials, appName: names.appName }).catch(() => false)) {
-    manifest.canaryUserName = `${names.appName}-canary`;
-    found.push(`Canary IAM user ${names.appName}-canary`);
+  const edgeWaf = waf.cloudfront || {};
+  if (edgeWaf.webAcl || edgeWaf.ipSet || edgeWaf.allowSet) {
+    manifest.cloudfrontWebAclId = edgeWaf.webAcl?.Id;
+    manifest.cloudfrontIpSetId = edgeWaf.ipSet?.Id;
+    manifest.cloudfrontWaf = true;
+    found.push(`CloudFront WAF resources for ${names.appName} (billed monthly)`);
+  }
+  for (const purpose of ["canary", "honey"]) {
+    if (await canaryExists({ credentials, appName: names.appName, purpose }).catch(() => false)) {
+      manifest[`${purpose}UserName`] = `${names.appName}-${purpose}`;
+      found.push(`${purpose === "canary" ? "Canary" : "Honey-credential"} IAM user ${names.appName}-${purpose}`);
+    }
   }
   if (repositoryName) {
     const { createEcrClient } = await import("./ecrService.js");
@@ -1185,4 +1277,42 @@ export async function discoverProjectResources({ credentials, project, repositor
     }
   }
   return { manifest, found };
+}
+
+/** Applies (or removes, with ports null) the outbound firewall on a live site; takes effect immediately. */
+export async function setTaskEgress({ credentials, resources, ports }) {
+  if (!resources?.taskSecurityGroupId) throw new Error("The site has no task security group; deploy it first.");
+  await reconcileTaskEgress(new EC2Client(awsConfig(credentials)), resources.taskSecurityGroupId, ports, null);
+}
+
+/** Puts (or with policy null deletes) the inline policy holding the permissions generated from the code. */
+export async function setTaskRolePolicy({ credentials, roleName, policyName = "SkyForgeCodePermissions", policy }) {
+  const iam = new IAMClient(awsConfig(credentials));
+  if (!policy) {
+    await iam.send(new DeleteRolePolicyCommand({ RoleName: roleName, PolicyName: policyName })).catch((error) => {
+      if (!error.name?.includes("NoSuchEntity")) throw error;
+    });
+    return;
+  }
+  await iam.send(new PutRolePolicyCommand({ RoleName: roleName, PolicyName: policyName, PolicyDocument: JSON.stringify(policy) }));
+}
+
+/** Inline and attached policies of the task role (what a compromised container could do in AWS). */
+export async function describeTaskRolePermissions({ credentials, roleName }) {
+  const iam = new IAMClient(awsConfig(credentials));
+  const { ListAttachedRolePoliciesCommand, GetRolePolicyCommand } = await import("@aws-sdk/client-iam");
+  const inlineNames = (await iam.send(new ListRolePoliciesCommand({ RoleName: roleName }))).PolicyNames || [];
+  const inline = [];
+  for (const name of inlineNames) {
+    const document = await iam.send(new GetRolePolicyCommand({ RoleName: roleName, PolicyName: name }));
+    inline.push({ name, document: JSON.parse(decodeURIComponent(document.PolicyDocument || "{}")) });
+  }
+  const attached = (await iam.send(new ListAttachedRolePoliciesCommand({ RoleName: roleName }))).AttachedPolicies || [];
+  return { inline, attached: attached.map((policy) => ({ name: policy.PolicyName, arn: policy.PolicyArn })) };
+}
+
+/** Restarts the service's tasks from the same task definition (incident recovery). */
+export async function forceNewTasks({ credentials, resources }) {
+  const ecs = new ECSClient(awsConfig(credentials));
+  await ecs.send(new UpdateServiceCommand({ cluster: resources.clusterName, service: resources.serviceName, forceNewDeployment: true }));
 }

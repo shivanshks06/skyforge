@@ -18,7 +18,16 @@ import {
 } from "lucide-react";
 import Card from "../components/Card";
 import Button from "../components/Button";
+import { IncidentsPanel, ProtectionSettingsPanel, DeceptionPanel, SecurityToolsPanel, SurfacePanel } from "../components/SecurityPanels";
 import {
+  getBlastRadius,
+  getCostEstimate,
+  replayBlockedAttacks,
+  resolveSecurityIncident,
+  rotateAdminDoor,
+  runRedTeamRehearsal,
+  runSecurityChecksNow,
+  saveSecuritySettings,
   bringSiteOnline,
   createSecurityFixPullRequest,
   getProjectSecurity,
@@ -40,21 +49,22 @@ const GRADE_STYLE = { A: "text-[#2E6B4F]", B: "text-[#3B7A75]", C: "text-amber-6
 
 const FREE_FEATURES = [
   "Security score: code scan + safe self-pentest after every deploy",
-  "Debug-mode, hard-coded secret, and insecure-config detection",
-  "One-click AI fix pull requests",
-  "Container image vulnerability scan (CVE)",
-  "Canary secret that reveals leaked credentials",
-  "Security headers on static sites, load balancer header hardening",
-  "AWS Shield Standard (network DDoS) — always on",
+  "Security gate before traffic switches (secrets, critical CVEs)",
+  "Alerts on Email, Slack, Discord, Telegram, webhooks + auto incident response",
+  "Canary secret, leak watch, new-CVE (OSV) and pushed-secret alerts",
+  "AI red-team rehearsal, blast-radius map, attack-surface diff per deploy",
+  "Outbound firewall, read-only containers, AWS permissions from code",
+  "Denial-of-wallet guard; decoy files on static sites",
+  "One-click AI fix pull requests; AWS Shield Standard always on",
 ];
 const PROTECTED_FEATURES = [
   "Everything in Free",
-  "AWS WAF: OWASP core rules, SQL injection, known bad inputs",
-  "Malicious IP reputation blocking",
-  "Rate limiting: 2,000 requests / 5 min per IP",
-  "Login brute-force limit (routes found in your code): 100 / 5 min",
-  "Honeypot tripwires that auto-ban scanners for 24 h",
-  "Under Attack mode and live blocked-attack dashboard",
+  "AWS WAF: OWASP core, SQL injection, known bad inputs, IP reputation",
+  "Decoy .env / AWS keys with honey credentials, robots.txt bait",
+  "Tripwire auto-bans + herd immunity across all your projects",
+  "Self-tuning rate limits and login brute-force limits from your code",
+  "Admin lockdown, rotating admin door, bot challenge",
+  "Under Attack mode (automatic on spikes), dashboard, attack replay",
 ];
 
 function TopList({ title, items }) {
@@ -119,6 +129,12 @@ export default function Security() {
     } finally {
       setBusy(null);
     }
+  };
+
+  const [toolResults, setToolResults] = useState({});
+  const tool = async (key, action, field) => {
+    const result = await run(key, action);
+    if (result) setToolResults((current) => ({ ...current, [field]: { ...result, at: result.at || new Date().toISOString() } }));
   };
 
   const switchTier = (tier) => {
@@ -199,6 +215,14 @@ export default function Security() {
         </p>
       </Card>
 
+      <IncidentsPanel
+        incidents={data.incidents}
+        alertChannels={data.alertChannels}
+        busy={busy}
+        onResolve={(incidentId) => run("resolve", () => resolveSecurityIncident(id, incidentId))}
+        onRunChecks={() => run("checks", () => runSecurityChecksNow(id))}
+      />
+
       {/* Tier */}
       <div className="grid grid-cols-1 lg:grid-cols-2 gap-4">
         {[["FREE", ShieldCheck, FREE_FEATURES], ["PROTECTED", ShieldAlert, PROTECTED_FEATURES]].map(([tier, Icon, features]) => (
@@ -211,7 +235,7 @@ export default function Security() {
           >
             <div className="flex items-center justify-between">
               <span className="flex items-center gap-2 text-base font-bold text-[#362217]"><Icon className="h-5 w-5 text-[#9E5D2D]" /> {data.tiers[tier].label}</span>
-              <span className="text-xs font-bold font-mono text-[#5E4C3E]">{tier === "FREE" ? "$0" : "~$14/month"}</span>
+              <span className="text-xs font-bold font-mono text-[#5E4C3E]">{tier === "FREE" ? "$0" : "~$14-20/month"}</span>
             </div>
             <ul className="flex flex-col gap-1">
               {features.map((feature) => (
@@ -222,6 +246,22 @@ export default function Security() {
           </button>
         ))}
       </div>
+
+      <ProtectionSettingsPanel data={data} busy={busy} onSave={(settings) => run("settings", () => saveSecuritySettings(id, settings))} />
+
+      <DeceptionPanel data={data} busy={busy} onRotateDoor={() => run("door", () => rotateAdminDoor(id))} />
+
+      <SecurityToolsPanel
+        data={data}
+        busy={busy}
+        results={toolResults}
+        onRedTeam={() => tool("redteam", () => runRedTeamRehearsal(id), "redTeam")}
+        onReplay={() => tool("replay", () => replayBlockedAttacks(id), "replay")}
+        onBlastRadius={() => tool("blast", () => getBlastRadius(id), "blast")}
+        onCost={() => tool("cost", () => getCostEstimate(id), "cost")}
+      />
+
+      <SurfacePanel data={data} />
 
       {/* Score + findings */}
       <Card glow={false} className="bg-white border border-[#EAE1D5] flex flex-col gap-4">
