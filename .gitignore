@@ -9,3 +9,4 @@ server/generated/
 .vscode/
 .idea/
 docker-compose.aws-profile.yml
+.skyforge/

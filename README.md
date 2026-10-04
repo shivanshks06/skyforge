@@ -651,6 +651,21 @@ $bytes = New-Object byte[] 32
 
 Use a different `FIELD_ENCRYPTION_KEY` and `JWT_SECRET` (32+ characters) for every environment. If `DATABASE_URL` contains special characters such as `@`, URL-encode them (`%40`).
 
+### One command to start or stop everything
+
+```powershell
+npm start          # Redis (Docker) + PostgreSQL check + migrations + API + worker + web app
+npm stop           # stops the API, worker, web app and Redis (PostgreSQL keeps running)
+npm run restart    # stop, then start
+npm run status     # what is running, with PIDs and URLs
+```
+
+`npm start` starts the Redis container (creating it the first time), starts the PostgreSQL Windows service if it is stopped, applies database migrations, launches the three processes in the background, and waits until the API, worker and web app answer. Then open `http://localhost:5173`. Logs go to `.skyforge/logs/` (`api.log`, `worker.log`, `client.log`). Running `npm start` twice is safe: anything already running is left alone. `npm stop -- --keep-redis` leaves Redis running.
+
+Requirements: Docker Desktop running (for Redis), PostgreSQL installed, `npm run install:all` done once, and `server/.env` filled in.
+
+### Running the processes by hand
+
 With PostgreSQL and Redis running, start each process in its own terminal:
 
 ```powershell
