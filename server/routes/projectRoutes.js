@@ -17,6 +17,7 @@ import {
   getSecurity, setSecurityTier, setUnderAttack, unbanIp, runSecurityScan, createSecurityFix, takeOffline, bringOnline,
   updateSecuritySettings, getIncidents, resolveIncident, runChecksNow, rotateAdminDoor, replayAttacks, runRedTeamRehearsal, getBlastRadius, getCostEstimate,
 } from "../controllers/securityController.js";
+import { getDatabase, updateDatabase } from "../controllers/databaseController.js";
 import protect from "../middleware/authMiddleware.js";
 import { rateLimit } from "../middleware/rateLimit.js";
 
@@ -58,6 +59,8 @@ router.post("/:id/docker/save", blueprintMutationLimit, saveDockerFiles);
 // Sprint 7 Cloud Infrastructure & Terraform routes
 router.get("/:id/infrastructure", blueprintMutationLimit, getInfrastructure);
 router.post("/:id/infrastructure/target", blueprintMutationLimit, updateInfrastructureTarget);
+router.get("/:id/database", getDatabase);
+router.post("/:id/database", blueprintMutationLimit, updateDatabase);
 
 // Security tiers, scans, firewall controls, and taking the site offline without destroying it
 const securityLimit = rateLimit({

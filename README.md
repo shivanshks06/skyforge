@@ -26,6 +26,7 @@ You connect GitHub and AWS, pick a repository, choose a deployment target, and p
 - [How a deployment works](#how-a-deployment-works)
 - [Build planner](#build-planner)
 - [Environment variables and services](#environment-variables-and-services)
+- [Databases](#databases)
 - [Security](#security)
 - [Taking a site offline](#taking-a-site-offline)
 - [Destroy and verified teardown](#destroy-and-verified-teardown)
@@ -168,6 +169,14 @@ Rollback restores a previous task definition. Retrying a deployment re-runs the 
 
 `server/services/buildPlanner.js` makes every build-time decision from the checked-out code rather than from metadata captured at import time.
 
+- **Full-stack repositories.** A browser frontend and a Node API in sibling folders (`client/` + `server/`, `frontend/` + `backend/`, `web/` + `api/`, ...) are built into **one container** (`server/services/fullStackBuilder.js`):
+  - the frontend is built (Vite, Create React App, Vue, Angular, Svelte, ...) and served as static files on port 80, with client-side routes falling back to `index.html`;
+  - the API runs on its own port inside the container, started with the command from its own Dockerfile (so steps like "run migrations, then start" are kept), its `start` script, or its entry file;
+  - `/api`, `/socket.io`, `/graphql`, `/health`, `/metrics`, WebSockets, and anything that is not a page or a file go to the API, so the browser talks to one address, just like behind the dev-server proxy;
+  - an unset socket URL variable (`VITE_SOCKET_URL`, `REACT_APP_WS_URL`, ...) defaults to `/` (this site), and the log warns about other `http://localhost` fallbacks in the frontend code;
+  - if the API process stops, the container stops, so AWS restarts it.
+
+  SSR frontends (Next.js, Nuxt, SvelteKit, Remix, Astro) and non-Node APIs are not combined this way.
 - **App root.** Uses the repository root if it holds a manifest. Otherwise it uses the nearest folder that does, preferring `app/`, `server/`, `backend/`, `api/`, `web/`, ...
 - **Entry point and port.**
   - Django: the package that contains `wsgi.py`.
@@ -213,7 +222,7 @@ Rollback restores a previous task definition. Retrying a deployment re-runs the 
 - **Optional.** Anything with a default (`process.env.X || "info"`, `getenv("X", "dev")`, `${X:10}`), plus frontend build-time variables.
 - Variables the platform sets itself (`PORT`, `HOST`, `NODE_ENV`, ...) and reads inside tests, tooling configs, and type declarations are ignored.
 
-**Backing services** (PostgreSQL, MySQL/MariaDB, MongoDB, Redis, SQLite) are detected from dependency manifests: npm, pip/Poetry/Pipfile, Go modules, Cargo features, Gemfile, Composer, Maven/Gradle, NuGet, and the Prisma provider. SkyForge **does not create databases**. It warns you to supply a hosted instance reachable from AWS (Neon, Supabase, MongoDB Atlas, Upstash, RDS, ...). It also warns when a configured value points at `localhost`, which on AWS is the container itself.
+**Backing services** (PostgreSQL, MySQL/MariaDB, MongoDB, Redis, SQLite) are detected from dependency manifests: npm, pip/Poetry/Pipfile, Go modules, Cargo features, Gemfile, Composer, Maven/Gradle, NuGet, and the Prisma provider. SkyForge warns when a configured value points at `localhost`, which on AWS is the container itself. For SQL databases you can choose how the app gets one (see [Databases](#databases)); for MongoDB and Redis, supply a hosted instance (MongoDB Atlas, Upstash, ...).
 
 **On the Environment page** (Plan screen), each variable shows:
 
@@ -223,6 +232,26 @@ Rollback restores a previous task definition. Retrying a deployment re-runs the 
 - service warnings, and a **Re-scan** button.
 
 Values are encrypted at rest (AES-GCM with `FIELD_ENCRYPTION_KEY`) and injected into the container as Secrets Manager secrets.
+
+### Databases
+
+The **Database** card on the Environment page offers two ways to give the app a PostgreSQL or MySQL database:
+
+| Option | What happens | Cost |
+|---|---|---|
+| **Use my own database URL** | You paste a connection string (Neon, Supabase, PlanetScale, your own RDS, ...) as `DATABASE_URL`. | Your provider's |
+| **Create one for me on AWS (RDS)** | On the next deploy SkyForge creates a database in your AWS account and gives the app its address. | About $13–16/month (`db.t4g.micro` + 20 GB), free for 12 months on free-tier accounts |
+
+The managed database (`server/services/rdsService.js`):
+
+- is **PostgreSQL 16** or **MySQL 8.0**, `db.t4g.micro`, 20 GB gp3, encrypted, single-AZ, with 1 day of automatic backups;
+- is **private**: no public address, and its security group only accepts connections from the app's containers (the private VPC range is allowed only until the app's security group exists on the first deploy);
+- gets a generated password, stored encrypted and passed to the app through Secrets Manager;
+- sets `DATABASE_URL` plus the usual variants, so most frameworks need no changes: `DB_HOST`, `DB_PORT`, `DB_USER`, `DB_USERNAME`, `DB_PASSWORD`, `DB_NAME`, `DB_DATABASE`, and `PG*` / `POSTGRES_*` (PostgreSQL) or `MYSQL_*` (MySQL). These variables count as set, so they never block deployment, and they override a `localhost` value;
+- takes 5–10 minutes the first time; later deploys reuse it, and its data survives redeploys;
+- allows plain connections for PostgreSQL (`rds.force_ssl=0` in a project parameter group), because many app drivers cannot verify the RDS certificate out of the box. Traffic never leaves the VPC.
+
+**One-Click Destroy deletes the database and its data** (no final snapshot, so nothing keeps billing), then its subnet group, parameter group and security group, and the verified sweep checks for all four. Taking a site offline does not stop the database.
 
 ---
 
@@ -712,6 +741,7 @@ The Settings screen offers two ways to connect:
 - `iam:ListRolePolicies` and `iam:GetRolePolicy` for the blast-radius map;
 - `ec2:AuthorizeSecurityGroupEgress` and `RevokeSecurityGroupEgress` for the outbound firewall;
 - `cloudwatch:GetMetricStatistics` for attack-spike detection, self-tuning limits, and the denial-of-wallet guard;
+- RDS instance, subnet-group and parameter-group actions plus `iam:CreateServiceLinkedRole` for the managed database;
 - ECR image scanning actions;
 - `logs:GetLogEvents`.
 

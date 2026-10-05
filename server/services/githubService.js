@@ -168,14 +168,39 @@ export const getUserRepositories = async (accessToken) => {
 export async function getRepositoryTreeWithRef(owner, repo, branch = "main", token = null) {
   const headers = { "User-Agent": "SkyForge-App" };
   if (token) headers.Authorization = `Bearer ${token}`;
+  const repoPath = `/repos/${encodeURIComponent(owner)}/${encodeURIComponent(repo)}`;
+  // An expired GitHub token must not stop analysis of public repositories.
+  const get = async (url) => {
+    try {
+      return await github.get(url, { headers });
+    } catch (error) {
+      if (error.response?.status !== 401 || !headers.Authorization) throw error;
+      delete headers.Authorization;
+      return github.get(url, { headers });
+    }
+  };
   const request = async (ref) => {
-    const { data } = await github.get(`/repos/${encodeURIComponent(owner)}/${encodeURIComponent(repo)}/git/trees/${encodeURIComponent(ref)}?recursive=1`, { headers });
+    const { data } = await get(`${repoPath}/git/trees/${encodeURIComponent(ref)}?recursive=1`);
     return { tree: data.tree || [], ref };
   };
+
+  // No branch given: use the repository's own default branch.
+  if (!branch) {
+    try {
+      const repoInfo = await get(repoPath);
+      branch = repoInfo.data?.default_branch || "main";
+    } catch {
+      branch = "main";
+    }
+  }
 
   try {
     return await request(branch);
   } catch (error) {
+    if (error.response?.status === 403 && error.response.headers?.["x-ratelimit-remaining"] === "0") {
+      const resetAt = Number(error.response.headers["x-ratelimit-reset"]) * 1000;
+      throw Object.assign(new Error("GitHub API rate limit reached."), { code: "GITHUB_RATE_LIMIT", resetAt: Number.isFinite(resetAt) ? resetAt : null, authenticated: Boolean(headers.Authorization) });
+    }
     if (branch === "main") {
       try {
         return await request("master");

@@ -35,7 +35,7 @@ function VariableInput({ name, value, disabled, onChange, placeholder }) {
  * Environment variables detected from the repository source: required ones block deployment
  * until set (or marked "not needed"), optional ones have defaults, services need hosted instances.
  */
-export default function EnvironmentWizard({ project, envValues, setEnvValues, onSave, saving, onScan, scanning }) {
+export default function EnvironmentWizard({ project, envValues, setEnvValues, onSave, saving, onScan, scanning, providedKeys = [] }) {
   const analysis = project?.envAnalysis;
   const [ignored, setIgnored] = useState(() => new Set(analysis?.ignored || []));
 
@@ -49,7 +49,9 @@ export default function EnvironmentWizard({ project, envValues, setEnvValues, on
     };
   }, [analysis, project?.requiredEnv]);
   const services = Array.isArray(analysis?.services) ? analysis.services : [];
-  const missing = required.filter((variable) => !ignored.has(variable.name) && !isFilled(envValues[variable.name]));
+  // Variables the SkyForge-managed database sets for the app.
+  const provided = new Set(providedKeys);
+  const missing = required.filter((variable) => !ignored.has(variable.name) && !provided.has(variable.name) && !isFilled(envValues[variable.name]));
 
   const setValue = (name, value) => setEnvValues({ ...envValues, [name]: value });
   const toggleIgnored = (name) => {
@@ -125,7 +127,8 @@ export default function EnvironmentWizard({ project, envValues, setEnvValues, on
               <tbody className="divide-y divide-[#EAE1D5]">
                 {required.map((variable) => {
                   const skipped = ignored.has(variable.name);
-                  const configured = isFilled(envValues[variable.name]);
+                  const auto = provided.has(variable.name);
+                  const configured = auto || isFilled(envValues[variable.name]);
                   return (
                     <tr key={variable.name} className={skipped ? "opacity-60" : "hover:bg-[#FAF8F5]/60 transition"}>
                       <td className="p-3 align-top">
@@ -146,11 +149,15 @@ export default function EnvironmentWizard({ project, envValues, setEnvValues, on
                                 : "bg-amber-500/10 text-amber-700 border-amber-500/20"
                           }`}
                         >
-                          {skipped ? "Skipped" : configured ? <><CheckCircle2 className="h-3 w-3" /> Set</> : <><AlertCircle className="h-3 w-3" /> Missing</>}
+                          {skipped ? "Skipped" : auto ? <><CheckCircle2 className="h-3 w-3" /> Automatic</> : configured ? <><CheckCircle2 className="h-3 w-3" /> Set</> : <><AlertCircle className="h-3 w-3" /> Missing</>}
                         </span>
                       </td>
                       <td className="p-3 align-top">
-                        <VariableInput name={variable.name} value={envValues[variable.name]} disabled={skipped} onChange={(value) => setValue(variable.name, value)} />
+                        {auto ? (
+                          <span className="text-[11px] text-[#2E6B4F]">Set automatically by the SkyForge-managed database</span>
+                        ) : (
+                          <VariableInput name={variable.name} value={envValues[variable.name]} disabled={skipped} onChange={(value) => setValue(variable.name, value)} />
+                        )}
                       </td>
                       <td className="p-3 align-top text-center">
                         <input

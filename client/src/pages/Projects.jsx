@@ -15,9 +15,18 @@ import {
   RefreshCw,
   Trash2,
   AlertTriangle,
+  CheckCircle2,
 } from "lucide-react";
 import { AuthContext } from "../context/authContext.js";
-import { getGithubLoginUrl, getProjects, createProject, deleteProject } from "../services/api";
+import { getGithubLoginUrl, getProjects, createProject, deleteProject, analyzeRepository } from "../services/api";
+
+/** "owner/repo", a GitHub URL, or a URL with /tree/<branch> → { owner, repo, branch }. */
+function parseRepository(value) {
+  const text = String(value || "").trim().replace(/\.git$/, "").replace(/\/+$/, "");
+  const match = text.match(/^(?:https?:\/\/)?(?:www\.)?(?:github\.com\/)?([\w.-]+)\/([\w.-]+)(?:\/tree\/([\w./-]+))?$/i);
+  if (!match) return null;
+  return { owner: match[1], repo: match[2], branch: match[3] || "" };
+}
 
 const PRESETS = {
   REACT_VITE: { label: "React / Vite / SPA", framework: "React + Vite", language: "JavaScript", packageManager: "npm", buildTool: "Vite", buildCommand: "npm run build", startCommand: "npm run preview", port: 80, deploymentTarget: "AWS ECS Fargate" },
@@ -41,9 +50,13 @@ export default function Projects() {
   const [showModal, setShowModal] = useState(false);
   const [projectName, setProjectName] = useState("");
   const [repoUrl, setRepoUrl] = useState("");
-  const [selectedPreset, setSelectedPreset] = useState("REACT_VITE");
-  const [branchName, setBranchName] = useState("main");
-  const [customPort, setCustomPort] = useState("80");
+  const [selectedPreset, setSelectedPreset] = useState("AUTO");
+  const [branchName, setBranchName] = useState("");
+  const [customPort, setCustomPort] = useState("");
+  // Values the user typed win over detected ones.
+  const [branchEdited, setBranchEdited] = useState(false);
+  const [portEdited, setPortEdited] = useState(false);
+  const [detection, setDetection] = useState({ status: "idle" });
   const [projectsList, setProjectsList] = useState([]);
   const [loading, setLoading] = useState(true);
   const [creating, setCreating] = useState(false);
@@ -54,11 +67,40 @@ export default function Projects() {
 
   const handlePresetChange = (presetKey) => {
     setSelectedPreset(presetKey);
-    const preset = PRESETS[presetKey];
-    if (preset) {
-      setCustomPort(String(preset.port));
-    }
+    const preset = presetKey === "AUTO" ? null : PRESETS[presetKey];
+    if (preset) setCustomPort(String(preset.port));
+    else if (detection.report?.detection?.port) setCustomPort(String(detection.report.detection.port));
+    setPortEdited(false);
   };
+
+  // Detect language, framework, branch and port from the repository as soon as it is entered.
+  const parsedRepo = parseRepository(repoUrl);
+  const detectBranch = branchEdited ? branchName.trim() : parsedRepo?.branch || "";
+  const detectKey = parsedRepo ? `${parsedRepo.owner}/${parsedRepo.repo}@${detectBranch}` : "";
+  useEffect(() => {
+    if (!showModal || !detectKey) return undefined;
+    let cancelled = false;
+    const task = window.setTimeout(async () => {
+      setDetection({ status: "detecting", key: detectKey });
+      try {
+        const report = await analyzeRepository({ owner: parsedRepo.owner, repo: parsedRepo.repo, branch: detectBranch });
+        if (cancelled) return;
+        setDetection({ status: "done", key: detectKey, report });
+        if (!branchEdited) setBranchName(report.branch || "");
+        if (!portEdited && report.detection?.port) setCustomPort(String(report.detection.port));
+        setProjectName((current) => current || parsedRepo.repo.toLowerCase());
+      } catch (detectError) {
+        if (!cancelled) setDetection({ status: "failed", key: detectKey, message: detectError.response?.data?.message || "Could not read the repository." });
+      }
+    }, 700);
+    return () => {
+      cancelled = true;
+      window.clearTimeout(task);
+    };
+  // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [detectKey, showModal]);
+
+  const detected = detection.status === "done" && detection.key === detectKey ? detection.report : null;
 
   const loadProjects = () => {
     setLoading(true);
@@ -94,15 +136,20 @@ export default function Projects() {
 
     const formattedName = projectName.trim().toLowerCase().replace(/\s+/g, "-");
     const formattedRepo = repoUrl.trim() || `user/${formattedName}`;
-    const preset = PRESETS[selectedPreset] || PRESETS.REACT_VITE;
-    const port = Number(customPort) || preset.port;
+    if (selectedPreset === "AUTO" && !detected) {
+      setError(detection.status === "detecting" ? "Still detecting the repository; try again in a moment." : "Auto-detect could not read this repository. Check the name, or pick a framework preset.");
+      return;
+    }
+    const found = detected?.detection;
+    const preset = selectedPreset === "AUTO" ? found : PRESETS[selectedPreset] || PRESETS.REACT_VITE;
+    const port = Number(customPort) || preset.port || 80;
 
     setCreating(true);
     try {
       const created = await createProject({
         name: formattedName,
         repoName: formattedRepo,
-        branch: branchName.trim() || "main",
+        branch: branchName.trim() || detected?.branch || "main",
         framework: preset.framework,
         language: preset.language,
         packageManager: preset.packageManager,
@@ -110,16 +157,22 @@ export default function Projects() {
         buildCommand: preset.buildCommand,
         startCommand: preset.startCommand,
         port,
-        dockerized: false,
-        requiredEnv: [],
-        deploymentTarget: preset.deploymentTarget,
-        confidence: 95,
+        dockerized: selectedPreset === "AUTO" ? Boolean(found?.dockerized) : false,
+        requiredEnv: selectedPreset === "AUTO" ? found?.requiredEnv || [] : [],
+        ...(selectedPreset === "AUTO" && found?.envAnalysis ? { envAnalysis: found.envAnalysis } : {}),
+        confidence: selectedPreset === "AUTO" ? found?.confidence ?? 80 : 95,
         githubUrl: repoUrl.trim().startsWith("http") ? repoUrl.trim() : `https://github.com/${formattedRepo}`,
       });
 
       setProjectsList([created, ...projectsList]);
       setProjectName("");
       setRepoUrl("");
+      setBranchName("");
+      setCustomPort("");
+      setBranchEdited(false);
+      setPortEdited(false);
+      setSelectedPreset("AUTO");
+      setDetection({ status: "idle" });
       setShowModal(false);
     } catch (createError) {
       setError(createError.response?.data?.message || "Unable to create project.");
@@ -347,7 +400,7 @@ export default function Projects() {
         <div className="fixed inset-0 z-50 flex items-center justify-center bg-[#362217]/50 backdrop-blur-sm p-4">
           <div role="dialog" aria-modal="true" aria-labelledby="create-project-title" className="w-full max-w-lg rounded-3xl border border-[#EAE1D5] bg-white p-6 shadow-2xl">
             <h3 id="create-project-title" className="text-lg font-bold text-[#362217] mb-1">Create New Project</h3>
-            <p className="text-xs text-[#5E4C3E] mb-5">Configure your repository profile or pick a framework preset.</p>
+            <p className="text-xs text-[#5E4C3E] mb-5">Paste a repository: language, framework, branch and port are detected automatically. You can still override any of them.</p>
 
             {error && (
               <div className="mb-4 flex items-center gap-2 rounded-xl border border-red-500/30 bg-red-500/10 p-3 text-xs text-red-600">
@@ -381,6 +434,9 @@ export default function Projects() {
                     onChange={(e) => handlePresetChange(e.target.value)}
                     className="w-full rounded-xl border border-[#DCD0C3] bg-white px-3 py-2.5 text-xs text-[#362217] outline-none focus:border-[#9E5D2D] focus:ring-1 focus:ring-[#9E5D2D] transition shadow-xs"
                   >
+                    <option value="AUTO">
+                      {detected ? `Auto-detected: ${detected.detection.framework}` : "Auto-detect (recommended)"}
+                    </option>
                     {Object.entries(PRESETS).map(([key, item]) => (
                       <option key={key} value={key}>
                         {item.label}
@@ -392,30 +448,53 @@ export default function Projects() {
                 <div className="grid grid-cols-2 gap-2">
                   <Input
                     label="Branch"
-                    placeholder="main"
+                    placeholder={detection.status === "detecting" ? "detecting…" : "auto"}
                     value={branchName}
-                    onChange={(e) => setBranchName(e.target.value)}
+                    onChange={(e) => {
+                      setBranchName(e.target.value);
+                      setBranchEdited(Boolean(e.target.value.trim()));
+                    }}
                   />
                   <Input
                     label="Port"
-                    placeholder="80"
+                    placeholder={detection.status === "detecting" ? "detecting…" : "auto"}
                     type="number"
                     value={customPort}
-                    onChange={(e) => setCustomPort(e.target.value)}
+                    onChange={(e) => {
+                      setCustomPort(e.target.value);
+                      setPortEdited(Boolean(e.target.value));
+                    }}
                   />
                 </div>
               </div>
 
-              <div className="p-3 rounded-xl bg-[#FAF8F5] border border-[#EAE1D5] text-[11px] text-[#5E4C3E] flex items-center justify-between">
-                <span>Target: <strong className="text-[#362217]">{PRESETS[selectedPreset]?.deploymentTarget}</strong></span>
-                <span>Language: <strong className="text-[#362217]">{PRESETS[selectedPreset]?.language}</strong></span>
+              <div className="p-3 rounded-xl bg-[#FAF8F5] border border-[#EAE1D5] text-[11px] text-[#5E4C3E] flex flex-col gap-1">
+                {!parsedRepo && <span>Enter a repository to detect its stack.</span>}
+                {parsedRepo && detection.status === "detecting" && (
+                  <span className="flex items-center gap-1.5"><RefreshCw className="h-3.5 w-3.5 animate-spin" /> Reading {parsedRepo.owner}/{parsedRepo.repo}…</span>
+                )}
+                {detected && (
+                  <>
+                    <span className="flex items-center gap-1.5 text-[#2E6B4F] font-semibold"><CheckCircle2 className="h-3.5 w-3.5" /> Detected from the repository{detected.detection.confidence ? ` (${detected.detection.confidence}% confidence)` : ""}</span>
+                    <span>
+                      <strong className="text-[#362217]">{detected.detection.framework}</strong> · {detected.detection.language} · branch <strong className="text-[#362217]">{detected.branch}</strong> · port <strong className="text-[#362217]">{detected.detection.port}</strong>
+                      {detected.detection.dockerized ? " · has a Dockerfile" : ""}
+                      {detected.detection.requiredEnv?.length ? ` · ${detected.detection.requiredEnv.length} required env var(s)` : ""}
+                    </span>
+                    {selectedPreset !== "AUTO" && <span className="text-amber-700">You picked a preset; it overrides the detected framework.</span>}
+                  </>
+                )}
+                {parsedRepo && detection.status === "failed" && detection.key === detectKey && (
+                  <span className="text-amber-700">{detection.message} Pick a framework preset and enter the branch and port yourself.</span>
+                )}
+                <span>The deployment target (ECS Fargate or CloudFront) is chosen later on the Infrastructure page.</span>
               </div>
 
               <div className="flex items-center justify-end gap-3 mt-2 pt-3 border-t border-[#EAE1D5]">
                 <Button type="button" variant="outline" size="sm" onClick={() => setShowModal(false)} disabled={creating}>
                   Cancel
                 </Button>
-                <Button type="submit" size="sm" loading={creating}>
+                <Button type="submit" size="sm" loading={creating} disabled={selectedPreset === "AUTO" && detection.status === "detecting"}>
                   Create Project Profile
                 </Button>
               </div>

@@ -21,14 +21,15 @@ import { TARGETS, normalizeTarget } from "../services/targets.js";
 
 const CLOUDFRONT_HELP = "HTTPS switches on automatically once AWS enables CloudFront for the account (AWS Support: \"Account verification for CloudFront\").";
 import { pushImageToEcr } from "../services/ecrService.js";
-import { deployToEcs, rollbackEcs, loadBalancerTargetsHealthy } from "../services/ecsService.js";
+import { deployToEcs, rollbackEcs, loadBalancerTargetsHealthy, projectNetwork, resourceNames } from "../services/ecsService.js";
 import { probeEndpoint, waitForDnsResolution } from "../services/healthService.js";
 import { addMonitorJob } from "../queues/monitorQueue.js";
 import { scanDirectory, localhostWarnings } from "../services/envScanner.js";
 import { findAppRoot } from "../services/buildPlanner.js";
 import { collectSourceFiles } from "../services/envScanner.js";
 import { prepareCanary, applyProtection, buildSecurityReport, patchProtection } from "../services/securityService.js";
-import { decryptObjectValues } from "../services/secretService.js";
+import { decryptObjectValues, encryptObjectValues } from "../services/secretService.js";
+import { usesManagedDatabase, managedDatabaseKeys, ensureManagedDatabase, databaseEnvironment, restrictDatabaseToApp } from "../services/rdsService.js";
 import { collectProjectSource, analyzeSource, codeGate, imageGate, hardeningFor, syncCodePermissions, refreshProject } from "../services/deploySecurity.js";
 import { runSecurityAutomation } from "../services/securityAutomation.js";
 
@@ -71,7 +72,7 @@ async function credentialsFor(userId) {
 
 // Re-scans the source actually being deployed and stops before the (slow) build when a required
 // variable is missing, instead of letting the container crash-loop on AWS.
-async function verifyEnvironment(project, sourceDir, deploymentId, { staticSite = false } = {}) {
+async function verifyEnvironment(project, sourceDir, deploymentId, { staticSite = false, providedKeys = [] } = {}) {
   let scan;
   try {
     scan = scanDirectory(findAppRoot(sourceDir));
@@ -89,11 +90,11 @@ async function verifyEnvironment(project, sourceDir, deploymentId, { staticSite 
     if (service.id === "sqlite") log("[ENV] This app uses SQLite: data is stored inside the container and is reset on every deployment.", "warn");
     else log(`[ENV] This app uses ${service.label} (${service.evidence.join(", ")}); it needs a hosted instance reachable from AWS${service.envVars.length ? ` via ${service.envVars.join(", ")}` : service.envHint ? `, usually configured as ${service.envHint}` : ""}.`, "warn");
   }
-  for (const name of localhostWarnings(configured)) log(`[ENV] ${name} points to localhost, which is the container itself on AWS; the app will not reach that service.`, "warn");
+  for (const name of localhostWarnings(configured).filter((key) => !providedKeys.includes(key))) log(`[ENV] ${name} points to localhost, which is the container itself on AWS; the app will not reach that service.`, "warn");
 
   // Static sites run no server code, so only build-time values (always optional) could matter.
   if (staticSite) return;
-  const missing = scan.variables.filter((variable) => variable.required && !ignored.includes(variable.name)
+  const missing = scan.variables.filter((variable) => variable.required && !ignored.includes(variable.name) && !providedKeys.includes(variable.name)
     && String(configured[variable.name] ?? "").trim() === "");
   if (!missing.length) {
     if (requiredEnv.length) log(`[ENV] All ${requiredEnv.length} required environment variable(s) are configured.`, "success");
@@ -256,7 +257,8 @@ export async function processDeploymentJob(job) {
 
     const sourceDir = await prepareRepository(project, deploymentId);
     await assertNotCancelled(deploymentId, workerJobId);
-    await verifyEnvironment(project, sourceDir, deploymentId, { staticSite: target === TARGETS.S3_CLOUDFRONT });
+    const managedDatabase = usesManagedDatabase(project) && target !== TARGETS.S3_CLOUDFRONT;
+    await verifyEnvironment(project, sourceDir, deploymentId, { staticSite: target === TARGETS.S3_CLOUDFRONT, providedKeys: managedDatabase ? managedDatabaseKeys(project.databaseConfig.engine) : [] });
     activeStep = "BUILDING";
     await updateStage(deploymentId, workerJobId, { status: "BUILDING", stage: "BUILDING", currentStep: "BUILDING" });
     // Security gate and code analysis run before anything is built, so nothing unsafe ever ships.
@@ -309,6 +311,13 @@ export async function processDeploymentJob(job) {
     const securityLog = (message, level = "info") => emitDeploymentLog(deploymentId, { stage: "DEPLOYING", message, level });
     const canary = await prepareCanary({ project, credentials, log: securityLog });
     if (canary.canary) await persistResources({ canaryUserName: canary.canary.userName });
+    if (managedDatabase) {
+      // Create (first deploy) or reuse the project's private RDS database and hand its address to the app.
+      const db = await ensureManagedDatabase({ credentials, project: await refreshProject(project.id), appName: resourceNames(project).appName, network: await projectNetwork(credentials), deploymentId });
+      await persistResources({ dbInstanceIdentifier: db.identifier, dbSecurityGroupId: db.securityGroupId });
+      runtimeProject.envConfig = { ...(runtimeProject.envConfig || {}), ...encryptObjectValues(databaseEnvironment(db)) };
+      runtimeProject.managedDatabase = db;
+    }
     const hardening = hardeningFor(securedProject, analysis);
     if (hardening.readOnlyRoot) emitDeploymentLog(deploymentId, { stage: "DEPLOYING", message: "[SECURITY] Tamper-proof mode: the container filesystem is read-only (writable scratch space only in /tmp, /var/tmp, /run, /var/cache/nginx).", level: "info" });
     try {
@@ -334,6 +343,11 @@ export async function processDeploymentJob(job) {
         extraEnvironment: canary.env,
         hardening: { ...hardening, readOnlyRoot: false },
       });
+    }
+    if (runtimeProject.managedDatabase && deployResult.resources?.taskSecurityGroupId) {
+      await restrictDatabaseToApp({ credentials, securityGroupId: runtimeProject.managedDatabase.securityGroupId, taskSecurityGroupId: deployResult.resources.taskSecurityGroupId, port: runtimeProject.managedDatabase.port })
+        .then(() => emitDeploymentLog(deploymentId, { stage: "DEPLOYING", message: "[DATABASE] Only the app's containers can reach the database.", level: "info" }))
+        .catch((dbError) => emitDeploymentLog(deploymentId, { stage: "DEPLOYING", message: `[DATABASE] Could not narrow database access: ${String(dbError.message).slice(0, 160)}`, level: "warn" }));
     }
     await syncCodePermissions({ project: securedProject, credentials, analysis, deploymentId }).catch((permissionError) => {
       emitDeploymentLog(deploymentId, { stage: "DEPLOYING", message: `[IAM] Code-derived permissions not applied: ${String(permissionError.message).slice(0, 160)}`, level: "warn" });
