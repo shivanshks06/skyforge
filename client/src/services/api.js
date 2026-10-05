@@ -137,3 +137,5 @@ export const replayBlockedAttacks = async (id) => (await api.post(`/projects/${i
 export const runRedTeamRehearsal = async (id) => (await api.post(`/projects/${id}/security/redteam`, {}, { timeout: 240_000 })).data;
 export const getBlastRadius = async (id) => (await api.get(`/projects/${id}/security/blast-radius`)).data;
 export const getCostEstimate = async (id) => (await api.get(`/projects/${id}/security/cost`, { timeout: 60_000 })).data;
+export const getProjectDatabase = async (id) => (await api.get(`/projects/${id}/database`)).data;
+export const saveProjectDatabase = async (id, body) => (await api.post(`/projects/${id}/database`, body)).data;

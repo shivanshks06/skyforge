@@ -68,6 +68,7 @@ import { decryptObjectValues } from "./secretService.js";
 import { awsPartitionForRegion } from "./awsPartition.js";
 import { deleteWebAcl, findWafLeftovers } from "./wafService.js";
 import { deleteCanary, canaryExists } from "./canaryService.js";
+import { destroyManagedDatabase, discoverManagedDatabase } from "./rdsService.js";
 
 function awsConfig(credentials) {
   if (!credentials?.accessKeyId || !credentials?.secretAccessKey) throw new Error("Valid AWS credentials are required for ECS deployment.");
@@ -1001,6 +1002,10 @@ export async function destroyEcsResources({ credentials, resources, deploymentId
   }
 
   // The task group references the ALB group in its ingress rule, so it must go first.
+  // The managed database's firewall references the app's security group, so it goes first.
+  if (resources.dbInstanceIdentifier || resources.dbSecurityGroupId || resources.dbSubnetGroupName || resources.dbParameterGroupName) {
+    await destroyManagedDatabase({ credentials, appName, deploymentId });
+  }
   if (resources.taskSecurityGroupId) await deleteSecurityGroupWhenReleased(ec2, resources.taskSecurityGroupId);
   if (resources.albSecurityGroupId) await deleteSecurityGroupWhenReleased(ec2, resources.albSecurityGroupId);
 
@@ -1276,6 +1281,15 @@ export async function discoverProjectResources({ credentials, project, repositor
       found.push(`ECR repository ${repositoryName} (image storage billed monthly)`);
     }
   }
+  // Projects that ever had a managed database must be checked for real; for the rest, missing RDS
+  // permissions just mean there is nothing to find.
+  const everHadDatabase = Boolean(project.databaseConfig?.identifier || project.databaseConfig?.mode === "rds");
+  const database = await discoverManagedDatabase({ credentials, appName: names.appName }).catch((error) => {
+    if (everHadDatabase) throw error;
+    return { manifest: {}, found: [] };
+  });
+  Object.assign(manifest, database.manifest);
+  found.push(...database.found);
   return { manifest, found };
 }
 
@@ -1315,4 +1329,12 @@ export async function describeTaskRolePermissions({ credentials, roleName }) {
 export async function forceNewTasks({ credentials, resources }) {
   const ecs = new ECSClient(awsConfig(credentials));
   await ecs.send(new UpdateServiceCommand({ cluster: resources.clusterName, service: resources.serviceName, forceNewDeployment: true }));
+}
+
+/** The VPC, two subnets in different zones, and the VPC's CIDR that deployments use. */
+export async function projectNetwork(credentials) {
+  const ec2 = new EC2Client(awsConfig(credentials));
+  const network = await describeDefaultNetwork(ec2);
+  const vpc = await ec2.send(new DescribeVpcsCommand({ VpcIds: [network.vpcId] }));
+  return { ...network, cidr: vpc.Vpcs?.[0]?.CidrBlock || "172.31.0.0/16" };
 }

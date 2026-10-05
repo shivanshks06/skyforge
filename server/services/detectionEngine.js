@@ -224,15 +224,22 @@ export function detectEnvironmentVariables(files) {
  * Scans code for explicit port assignments, falling back to framework defaults.
  */
 export function detectPort(tree, files, framework, buildTool) {
-  // 1. Search for explicit ports in code files
+  // 1. The repository's own Dockerfile says which port the container listens on.
+  const exposed = String(files.Dockerfile || "").match(/^\s*EXPOSE\s+(\d{2,5})/im);
+  if (exposed) {
+    const portNum = parseInt(exposed[1], 10);
+    if (portNum > 0 && portNum <= 65535) return portNum;
+  }
+
+  // 2. Explicit ports in code (compose/YAML files describe host mappings, not the app)
   const portPatterns = [
     /(?:process\.env\.PORT\s*\|\|\s*|PORT\s*=\s*|listen\(|port:\s*|port\s*=\s*)(\d{4,5})/i,
     /uvicorn\.run\(.*port\s*=\s*(\d{4,5})/i,
     /app\.run\(.*port\s*=\s*(\d{4,5})/i,
   ];
 
-  for (const content of Object.values(files)) {
-    if (!content || typeof content !== "string") continue;
+  for (const [name, content] of Object.entries(files)) {
+    if (!content || typeof content !== "string" || /\.(ya?ml|json|lock|toml)$|compose|Dockerfile|\.env/i.test(name)) continue;
     for (const pattern of portPatterns) {
       const match = content.match(pattern);
       if (match && match[1]) {
@@ -483,7 +490,8 @@ export async function detectProject(tree, files) {
       calculateScore: () => {
         let score = 0;
         if (hasTreeFile("manage.py")) score += 55;
-        if (reqString.includes("django")) score += 35;
+        if (reqString.includes("django") || /django/i.test(files.Dockerfile || "")) score += 35;
+        if (tree.some((f) => /(^|\/)(wsgi|asgi)\.py$/.test(f.path || "")) && tree.some((f) => /(^|\/)settings\.py$/.test(f.path || ""))) score += 30;
         if (files["requirements.txt"] || files["pyproject.toml"]) score += 10;
         return score;
       },
@@ -570,10 +578,14 @@ export async function detectProject(tree, files) {
       language: "HTML / JavaScript",
       calculateScore: () => {
         let score = 0;
-        if (hasTreeFile("index.html") && !pkgString.includes('"react"') && !pkgString.includes('"vue"') && !hasTreeFile("next.config.js") && !hasTreeFile("next.config.mjs")) score += 65;
+        // Server-side templates (Django/Flask/Rails/Laravel views) are not a static site.
+        const staticIndex = tree.some((f) => /^(index\.html|(public|static|site|www|dist|docs|src)\/index\.html)$/i.test(f.path || ""));
+        if (staticIndex && !pkgString.includes('"react"') && !pkgString.includes('"vue"') && !hasTreeFile("next.config.js") && !hasTreeFile("next.config.mjs")) score += 65;
         if (tree.some((f) => f.path?.endsWith(".css"))) score += 15;
         if (tree.some((f) => f.path?.endsWith(".js") && !f.path?.includes("node_modules"))) score += 15;
-        return score;
+        const backend = ["manage.py", "requirements.txt", "pyproject.toml", "go.mod", "pom.xml", "build.gradle", "Gemfile", "composer.json", "Cargo.toml", "artisan"].some((name) => hasTreeFile(name));
+        if (backend) score -= 60;
+        return Math.max(0, score);
       },
       getBuildCommand: () => "",
       getStartCommand: () => "",

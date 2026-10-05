@@ -12,6 +12,7 @@ import { getRedisStatus } from "../redis/connection.js";
 import { toPublicDeployment } from "../services/deploymentSerializer.js";
 import { toPublicProject } from "../services/projectSerializer.js";
 import { effectiveRequiredEnv } from "../services/envScanner.js";
+import { usesManagedDatabase, managedDatabaseKeys } from "../services/rdsService.js";
 import { normalizeTarget, TARGETS } from "../services/targets.js";
 import { uniqueResources, validateResourceManifests } from "../services/resourceUtils.js";
 
@@ -85,7 +86,9 @@ async function preflight(project) {
   if (!target) blockers.push("Choose a deployment target (ECS Fargate, ECS Fargate + CloudFront, or S3 + CloudFront) on the Infrastructure page.");
   if (target === TARGETS.S3_CLOUDFRONT && !/^\d{12}$/.test(credentials?.accountId || "")) blockers.push("The AWS account ID is needed for the S3 bucket name; reconnect AWS.");
   // Static sites have no server, so runtime variables do not apply.
-  const required = target === TARGETS.S3_CLOUDFRONT ? [] : effectiveRequiredEnv(project);
+  // A SkyForge-managed database supplies DATABASE_URL and friends itself.
+  const managed = usesManagedDatabase(project) ? managedDatabaseKeys(project.databaseConfig.engine) : [];
+  const required = target === TARGETS.S3_CLOUDFRONT ? [] : effectiveRequiredEnv(project).filter((key) => !managed.includes(key));
   const configured = decryptObjectValues(project.envConfig || {});
   for (const key of required) {
     if (configured[key] === undefined || configured[key] === null || String(configured[key]).trim() === "") blockers.push(`Environment variable ${key} is not configured.`);

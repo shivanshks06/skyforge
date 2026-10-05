@@ -46,6 +46,7 @@ model Project {
   securityReport   Json?
   protection       Json?
   siteOffline      Boolean      @default(false)
+  databaseConfig   Json?
   deploymentTarget String?
   confidence       Int?
   status           String       @default("Imported")

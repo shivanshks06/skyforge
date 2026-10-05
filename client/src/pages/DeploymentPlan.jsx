@@ -22,6 +22,13 @@ import {
 } from "lucide-react";
 import { getProjectPlan, generateProjectPlan, saveProjectEnvVars, scanProjectEnv } from "../services/api";
 import EnvironmentWizard from "../components/EnvironmentWizard";
+import DatabaseCard from "../components/DatabaseCard";
+
+// Variables a SkyForge-managed database provides (kept in sync with server/services/rdsService.js).
+const MANAGED_DB_KEYS = {
+  postgres: ["DATABASE_URL", "DB_HOST", "DB_PORT", "DB_USER", "DB_USERNAME", "DB_PASSWORD", "DB_NAME", "DB_DATABASE", "POSTGRES_URL", "PGHOST", "PGPORT", "PGUSER", "PGPASSWORD", "PGDATABASE", "POSTGRES_HOST", "POSTGRES_USER", "POSTGRES_PASSWORD", "POSTGRES_DB"],
+  mysql: ["DATABASE_URL", "DB_HOST", "DB_PORT", "DB_USER", "DB_USERNAME", "DB_PASSWORD", "DB_NAME", "DB_DATABASE", "MYSQL_URL", "MYSQL_HOST", "MYSQL_PORT", "MYSQL_USER", "MYSQL_PASSWORD", "MYSQL_DATABASE"],
+};
 
 export default function DeploymentPlan() {
   const { id } = useParams();
@@ -39,6 +46,7 @@ export default function DeploymentPlan() {
   const [copiedCode, setCopiedCode] = useState(false);
   const [toast, setToast] = useState(null);
   const [loadError, setLoadError] = useState(null);
+  const [databaseMode, setDatabaseMode] = useState({ mode: "external", engine: "postgres" });
   const loadGeneration = useRef(0);
   const toastTimer = useRef(null);
 
@@ -370,8 +378,16 @@ export default function DeploymentPlan() {
         </div>
       </div>
 
+      <DatabaseCard
+        projectId={id}
+        needed={(projectData.envAnalysis?.services || []).some((service) => /postgres|mysql|maria|database|sql/i.test(`${service.id} ${service.label}`)) || (projectData.requiredEnv || []).some((name) => /DATABASE_URL|^DB_|POSTGRES|MYSQL/.test(name))}
+        onChange={(mode, engine) => setDatabaseMode({ mode, engine })}
+        onNotify={showToast}
+      />
+
       {/* Step 9: Environment variables detected from the source */}
       <EnvironmentWizard
+        providedKeys={databaseMode.mode === "rds" ? MANAGED_DB_KEYS[databaseMode.engine] || MANAGED_DB_KEYS.postgres : []}
         key={projectData.envAnalysis?.scannedAt || "unscanned"}
         project={projectData}
         envValues={envValues}

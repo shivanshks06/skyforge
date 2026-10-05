@@ -310,11 +310,13 @@ const PRICE = {
 };
 
 /** Projected monthly cost from the last 24 hours of traffic. */
-export function projectMonthlyCost({ requests24h = 0, bytes24h = 0, edgeRequests24h = 0, edgeBytes24h = 0, cpu = 0.5, memoryGb = 1, protectedTier = false, ruleCount = 9, hasAlb = true }) {
+export function projectMonthlyCost({ requests24h = 0, bytes24h = 0, edgeRequests24h = 0, edgeBytes24h = 0, cpu = 0.5, memoryGb = 1, protectedTier = false, ruleCount = 9, hasAlb = true, managedDatabase = false }) {
   const gb = bytes24h / 1e9;
   const lcuPerHour = Math.max(gb / 24, requests24h / (24 * 3600 * 25));
   const fixed = (hasAlb ? PRICE.albHour * PRICE.hoursPerMonth + (cpu * PRICE.fargateVcpuHour + memoryGb * PRICE.fargateGbHour) * PRICE.hoursPerMonth : 0.05)
-    + (protectedTier ? PRICE.wafAcl + PRICE.wafRule * ruleCount : 0);
+    + (protectedTier ? PRICE.wafAcl + PRICE.wafRule * ruleCount : 0)
+    // db.t4g.micro on-demand + 20 GB gp3 storage
+    + (managedDatabase ? 0.016 * PRICE.hoursPerMonth + 20 * 0.115 : 0);
   const variable = 30 * (
     (hasAlb ? lcuPerHour * 24 * PRICE.lcuHour + gb * PRICE.dataOutGb : 0)
     + (protectedTier ? (requests24h + edgeRequests24h) / 1e6 * PRICE.wafPerMillion : 0)
@@ -344,7 +346,7 @@ export async function estimateCost({ project, credentials, resources }) {
   }
   const cpu = Number.parseFloat(project.cpu) || 0.5;
   const memoryGb = /MB/.test(project.memory || "") ? (Number.parseFloat(project.memory) || 512) / 1024 : Number.parseFloat(project.memory) || 1;
-  const cost = projectMonthlyCost({ requests24h, bytes24h, edgeRequests24h, edgeBytes24h, cpu, memoryGb, protectedTier: project.securityTier === "PROTECTED" && Boolean(project.protection?.waf), ruleCount: project.protection?.waf?.ruleCount || 9, hasAlb: Boolean(resources?.loadBalancerArn) });
+  const cost = projectMonthlyCost({ requests24h, bytes24h, edgeRequests24h, edgeBytes24h, cpu, memoryGb, protectedTier: project.securityTier === "PROTECTED" && Boolean(project.protection?.waf), ruleCount: project.protection?.waf?.ruleCount || 9, hasAlb: Boolean(resources?.loadBalancerArn), managedDatabase: Boolean(project.databaseConfig?.identifier) });
   return { ...cost, requests24h, bytes24h, edgeRequests24h, edgeBytes24h, budget: settings.walletBudgetUsd, at: new Date().toISOString(), note: resources?.loadBalancerArn || distributionId ? null : "S3 website hosting publishes no free traffic metrics; the estimate covers storage only." };
 }
 

@@ -166,13 +166,16 @@ export const analyzeRepo = async (req, res) => {
   try {
     const owner = String(req.body?.owner || "").trim();
     const repo = String(req.body?.repo || "").trim();
-    const branch = String(req.body?.branch || "main").trim();
-    if (!/^[\w.-]+$/.test(owner) || !/^[\w.-]+$/.test(repo) || [owner, repo].some((value) => value === "." || value === "..") || !/^[\w./-]+$/.test(branch) || branch.length > 255 || branch.includes("..")) {
+    // An empty branch means "the repository's default branch".
+    const branch = String(req.body?.branch ?? "").trim();
+    if (!/^[\w.-]+$/.test(owner) || !/^[\w.-]+$/.test(repo) || [owner, repo].some((value) => value === "." || value === "..") || (branch && (!/^[\w./-]+$/.test(branch) || branch.length > 255 || branch.includes("..")))) {
       return res.status(400).json({ message: "Repository owner, name, and branch are invalid." });
     }
 
     const account = await prisma.gitHubAccount.findUnique({ where: { userId: req.user.id } });
-    const token = account ? decryptSecret(account.accessToken) : null;
+    let token = account ? decryptSecret(account.accessToken) : null;
+    // An expired or revoked GitHub login must not stop analysis of public repositories.
+    if (token && (await getGitHubUserProfile(token).then(() => false, (error) => error.response?.status === 401))) token = null;
     const report = await analyzeRepository({ owner, repo, branch, token });
 
     if (!report?.detection) {
@@ -180,6 +183,12 @@ export const analyzeRepo = async (req, res) => {
     }
     return res.json(report);
   } catch (error) {
+    if (error.code === "GITHUB_RATE_LIMIT") {
+      const minutes = error.resetAt ? Math.max(1, Math.ceil((error.resetAt - Date.now()) / 60_000)) : null;
+      return res.status(429).json({
+        message: `GitHub's request limit is used up${minutes ? ` (resets in about ${minutes} minute${minutes === 1 ? "" : "s"})` : ""}.${error.authenticated ? "" : " Reconnect GitHub in Settings to raise the limit from 60 to 5,000 requests per hour."}`,
+      });
+    }
     console.error("Error analyzing repository:", error.message);
     return res.status(500).json({ message: "Failed to analyze repository" });
   }

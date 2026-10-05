@@ -15,6 +15,7 @@ import { runCommand } from "./commandRunner.js";
 import { isBlockedSecretFile } from "./secretFilePolicy.js";
 import { createDockerIgnoreFilter } from "./dockerIgnoreFilter.js";
 import { isMultiServiceProject, setupMultiServiceWorkspace } from "./multiServiceBuilder.js";
+import { detectFullStack, writeFullStackWorkspace, frontendBuildDefaults, fullStackPublicPort } from "./fullStackBuilder.js";
 
 function resolveDockerfile(dir) {
   if (!dir) return null;
@@ -304,6 +305,25 @@ export async function buildContainerImage(project, deploymentId, sourceDir, imag
   const generatedDockerfile = path.join(projectDir, "Dockerfile.generated");
   const savedDockerfile = path.join(projectDir, "Dockerfile");
   const log = (message, level = "info") => emitDeploymentLog(deploymentId, { stage: "BUILDING", message, level });
+
+  // client/ + server/ style repositories: build the frontend and the API into one container.
+  const fullStack = project.dockerStrategy === "CUSTOM" ? null : detectFullStack(sourceDir);
+  if (fullStack) {
+    const publicPort = fullStackPublicPort(fullStack);
+    log(`[BUILD] Detected a ${fullStack.summary}. Building the frontend and the API into one container (served on port ${publicPort}; API paths ${fullStack.backend.prefixes.slice(0, 6).join(", ")} and WebSockets go to the API on port ${fullStack.backend.port}).`);
+    const publicEnv = Object.entries(decryptObjectValues(project.envConfig || {}))
+      .filter(([key]) => /^(?:VITE_|NEXT_PUBLIC_|PUBLIC_|REACT_APP_|NUXT_PUBLIC_|EXPO_PUBLIC_|VUE_APP_)/.test(key));
+    const { defaults, localhostFallbacks } = frontendBuildDefaults(sourceDir, fullStack, publicEnv.map(([key]) => key));
+    for (const [key, value] of Object.entries(defaults)) {
+      publicEnv.push([key, value]);
+      log(`[BUILD] ${key} is not set; using ${value ? `"${value}"` : "an empty value"} (this site) so the browser reaches the deployed API instead of localhost.`);
+    }
+    if (localhostFallbacks.length) log(`[BUILD] Some frontend files fall back to http://localhost URLs (${localhostFallbacks.join(", ")}). Requests that use them will not reach the deployed API; set the matching VITE_/REACT_APP_ variable if a feature does not work.`, "warn");
+    const dockerfilePath = writeFullStackWorkspace(sourceDir, fullStack, { publicPort, publicEnvKeys: publicEnv.map(([key]) => key) });
+    log(`[BUILD] API start command: ${fullStack.backend.command.join(" ")}`);
+    await dockerBuild({ contextDir: sourceDir, dockerfilePath, imageTag, buildArgs: publicEnv.flatMap(([key, value]) => ["--build-arg", `${key}=${String(value)}`]), deploymentId });
+    return { imageTag, dockerfile: "fullstack", port: publicPort };
+  }
 
   if (isMultiServiceProject(sourceDir)) {
     log("[BUILD] Detected multi-service microservice application. Synthesizing unified reverse-proxy gateway and inter-service container...");
