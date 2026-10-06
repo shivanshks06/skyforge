@@ -16,6 +16,7 @@ import { isBlockedSecretFile } from "./secretFilePolicy.js";
 import { createDockerIgnoreFilter } from "./dockerIgnoreFilter.js";
 import { isMultiServiceProject, setupMultiServiceWorkspace } from "./multiServiceBuilder.js";
 import { detectFullStack, writeFullStackWorkspace, frontendBuildDefaults, fullStackPublicPort } from "./fullStackBuilder.js";
+import { useEcrPublicMirror } from "./cloudBuildService.js";
 
 function resolveDockerfile(dir) {
   if (!dir) return null;
@@ -263,33 +264,91 @@ export async function prepareRepository(project, deploymentId) {
   return sourceDir;
 }
 
-async function dockerBuild({ contextDir, dockerfilePath, imageTag, buildArgs, deploymentId, extraFiles = [] }) {
+const NETWORK_BUILD_ERROR = /forcibly closed|connection reset|connection refused|i\/o timeout|TLS handshake timeout|timeout awaiting|failed to fetch anonymous token|failed to fetch oauth token|failed to resolve source metadata|failed to do request|unexpected EOF|: EOF|no such host|temporary failure in name resolution|network is unreachable|context deadline exceeded|ECONNRESET|ETIMEDOUT|EAI_AGAIN|Could not resolve host|Connection timed out|Read timed out|502 Bad Gateway|503 Service Unavailable|504 Gateway Time-?out|TOOMANYREQUESTS|toomanyrequests/i;
+
+/** True when a docker build failed on the network (registry, package index), not on the app's code. */
+export function isNetworkBuildError(message = "") {
+  return NETWORK_BUILD_ERROR.test(String(message));
+}
+
+/** AWS refused to run a cloud build for account reasons (quota, not subscribed, not authorized). */
+export function isCloudBuildUnavailable(error) {
+  return /Cannot have more than \d+ builds|AccountLimitExceeded|account.*(limit|quota)|SubscriptionRequired|OptInRequired|not authorized to perform: codebuild|AccessDenied.*codebuild/i.test(`${error?.name} ${error?.message}`);
+}
+
+function networkErrorSummary(message = "") {
+  const line = String(message).split("\n").find((text) => NETWORK_BUILD_ERROR.test(text)) || "";
+  return line.replace(/^.*?(ERROR:|error:)\s*/i, "").slice(0, 160) || "connection problem";
+}
+
+async function dockerBuild({ contextDir, dockerfilePath, imageTag, buildArgs, deploymentId, extraFiles = [], cloud = null }) {
   // The Dockerfile must live inside the streamed context; generated ones are copied in temporarily.
   const inContext = path.dirname(dockerfilePath) === contextDir;
   const contextDockerfile = inContext ? path.basename(dockerfilePath) : ".skyforge.Dockerfile";
   if (!inContext) await fs.copyFile(dockerfilePath, path.join(contextDir, contextDockerfile));
   for (const file of extraFiles) await fs.copyFile(file.from, path.join(contextDir, file.name));
+  // Cloud builds pull official base images from Amazon ECR Public (no Docker Hub pull limits).
+  const cloudDockerfile = ".skyforge.cloud.Dockerfile";
+  if (cloud) await fs.writeFile(path.join(contextDir, cloudDockerfile), useEcrPublicMirror(await fs.readFile(path.join(contextDir, contextDockerfile), "utf-8")));
   const archivePath = path.join(os.tmpdir(), `skyforge-build-${deploymentId}-${Date.now()}.tar.gz`);
   let contextStream;
   try {
-    const ignoreFilter = createDockerIgnoreFilter(contextDir, [contextDockerfile, ...extraFiles.map((file) => file.name)]);
+    const ignoreFilter = createDockerIgnoreFilter(contextDir, [contextDockerfile, ...(cloud ? [cloudDockerfile] : []), ...extraFiles.map((file) => file.name)]);
     await tar.c({ gzip: true, file: archivePath, cwd: contextDir, portable: true, filter: ignoreFilter }, ["."]);
-    contextStream = fsSync.createReadStream(archivePath);
-    await runCommand("docker", [
-      "build", "--pull", ...buildArgs, "-t", imageTag, "-f", contextDockerfile, "-",
-    ], {
-      input: contextStream,
-      timeout: Number.parseInt(process.env.BUILD_TIMEOUT_MS || "900000", 10),
-      onLine: (line) => emitDeploymentLog(deploymentId, {
-        stage: "BUILDING",
-        message: `[DOCKER] ${line.slice(0, 240)}`,
-        level: /error|failed|fatal/i.test(line) ? "warn" : "info",
-      }),
-    });
+    // Downloading base images and packages fails on flaky connections; those errors are retried
+    // (Docker keeps every layer it already finished), errors in the app's own build are not.
+    const attempts = 3;
+    for (let attempt = 1; attempt <= attempts; attempt += 1) {
+      contextStream?.destroy();
+      try {
+        if (cloud && !cloud.unavailable) {
+          const pairs = [];
+          for (let index = 0; index < buildArgs.length; index += 2) {
+            const [name, ...value] = String(buildArgs[index + 1] || "").split("=");
+            if (buildArgs[index] === "--build-arg" && name) pairs.push([name, value.join("=")]);
+          }
+          try {
+            cloud.result = await cloud.build({ archivePath, dockerfileName: cloudDockerfile, buildArgs: pairs });
+            break;
+          } catch (cloudError) {
+            // AWS first, this machine second: any cloud failure falls back to a local build,
+            // except a deployment the owner cancelled.
+            if (cloudError.code === "DEPLOYMENT_CANCELLED") throw cloudError;
+            cloud.unavailable = true;
+            const reason = String(cloudError.message).split("\n")[0].slice(0, 160);
+            emitDeploymentLog(deploymentId, {
+              stage: "BUILDING",
+              message: isCloudBuildUnavailable(cloudError)
+                ? `[CLOUD BUILD] AWS CodeBuild is not available on this account yet (${reason}). Building on this machine instead. To enable cloud builds, request a higher "Concurrently running builds" quota for CodeBuild in AWS Service Quotas.`
+                : `[CLOUD BUILD] The AWS build did not succeed (${reason}). Building on this machine instead.`,
+              level: "warn",
+            });
+          }
+        }
+        contextStream = fsSync.createReadStream(archivePath);
+        await runCommand("docker", [
+          "build", ...(attempt === 1 ? ["--pull"] : []), ...buildArgs, "-t", imageTag, "-f", contextDockerfile, "-",
+        ], {
+          input: contextStream,
+          timeout: Number.parseInt(process.env.BUILD_TIMEOUT_MS || "900000", 10),
+          onLine: (line) => emitDeploymentLog(deploymentId, {
+            stage: "BUILDING",
+            message: `[DOCKER] ${line.slice(0, 240)}`,
+            level: /error|failed|fatal/i.test(line) ? "warn" : "info",
+          }),
+        });
+        break;
+      } catch (error) {
+        if (attempt >= attempts || !isNetworkBuildError(error.message)) throw error;
+        emitDeploymentLog(deploymentId, { stage: "BUILDING", message: `[BUILD] A download failed because of the network (attempt ${attempt}/${attempts}): ${networkErrorSummary(error.message)}. Retrying in 15s; finished steps are reused.`, level: "warn" });
+        await new Promise((resolve) => setTimeout(resolve, 15_000));
+      }
+    }
   } finally {
     contextStream?.destroy();
     await fs.rm(archivePath, { force: true });
     if (!inContext) await fs.rm(path.join(contextDir, contextDockerfile), { force: true });
+    if (cloud) await fs.rm(path.join(contextDir, cloudDockerfile), { force: true });
     for (const file of extraFiles) await fs.rm(path.join(contextDir, file.name), { force: true });
   }
 }
@@ -300,7 +359,7 @@ async function dockerBuild({ contextDir, dockerfilePath, imageTag, buildArgs, de
  * fails and another viable Dockerfile exists (generated vs. the repository's own), it is retried
  * with the alternative before the deployment fails.
  */
-export async function buildContainerImage(project, deploymentId, sourceDir, imageTag) {
+export async function buildContainerImage(project, deploymentId, sourceDir, imageTag, { cloud = null } = {}) {
   const projectDir = safeProjectDirectory(project.id);
   const generatedDockerfile = path.join(projectDir, "Dockerfile.generated");
   const savedDockerfile = path.join(projectDir, "Dockerfile");
@@ -321,16 +380,16 @@ export async function buildContainerImage(project, deploymentId, sourceDir, imag
     if (localhostFallbacks.length) log(`[BUILD] Some frontend files fall back to http://localhost URLs (${localhostFallbacks.join(", ")}). Requests that use them will not reach the deployed API; set the matching VITE_/REACT_APP_ variable if a feature does not work.`, "warn");
     const dockerfilePath = writeFullStackWorkspace(sourceDir, fullStack, { publicPort, publicEnvKeys: publicEnv.map(([key]) => key) });
     log(`[BUILD] API start command: ${fullStack.backend.command.join(" ")}`);
-    await dockerBuild({ contextDir: sourceDir, dockerfilePath, imageTag, buildArgs: publicEnv.flatMap(([key, value]) => ["--build-arg", `${key}=${String(value)}`]), deploymentId });
-    return { imageTag, dockerfile: "fullstack", port: publicPort };
+    await dockerBuild({ contextDir: sourceDir, dockerfilePath, imageTag, buildArgs: publicEnv.flatMap(([key, value]) => ["--build-arg", `${key}=${String(value)}`]), deploymentId, cloud });
+    return { imageTag, dockerfile: "fullstack", port: publicPort, pushed: cloud?.result || null };
   }
 
   if (isMultiServiceProject(sourceDir)) {
     log("[BUILD] Detected multi-service microservice application. Synthesizing unified reverse-proxy gateway and inter-service container...");
     const gatewayPort = Number.parseInt(project.port || "80", 10) || 80;
     await setupMultiServiceWorkspace(sourceDir, gatewayPort);
-    await dockerBuild({ contextDir: sourceDir, dockerfilePath: path.join(sourceDir, "Dockerfile.multiservice"), imageTag, buildArgs: [], deploymentId });
-    return { imageTag, dockerfile: "multiservice", port: gatewayPort };
+    await dockerBuild({ contextDir: sourceDir, dockerfilePath: path.join(sourceDir, "Dockerfile.multiservice"), imageTag, buildArgs: [], deploymentId, cloud });
+    return { imageTag, dockerfile: "multiservice", port: gatewayPort, pushed: cloud?.result || null };
   }
 
   let plan = null;
@@ -399,8 +458,8 @@ export async function buildContainerImage(project, deploymentId, sourceDir, imag
     try {
       await attempt.prepare?.();
       log(`[DOCKER] Building ${imageTag} with the ${attempt.label}...`);
-      await dockerBuild({ contextDir: attempt.contextDir, dockerfilePath: attempt.dockerfilePath, imageTag, buildArgs, deploymentId, extraFiles: attempt.extraFiles });
-      return { imageTag, dockerfile: attempt.kind, port: attempt.port };
+      await dockerBuild({ contextDir: attempt.contextDir, dockerfilePath: attempt.dockerfilePath, imageTag, buildArgs, deploymentId, extraFiles: attempt.extraFiles, cloud });
+      return { imageTag, dockerfile: attempt.kind, port: attempt.port, pushed: cloud?.result || null };
     } catch (error) {
       lastError = error;
       if (index < viable.length - 1) log(`[BUILD] Build with the ${attempt.label} failed (${error.message.slice(0, 160)}); retrying with the ${viable[index + 1].label}...`, "warn");

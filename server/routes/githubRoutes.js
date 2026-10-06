@@ -5,6 +5,7 @@ import {
   getRepos,
   analyzeRepo,
   disconnectGithub,
+  githubWebhook,
 } from "../controllers/githubController.js";
 import protect from "../middleware/authMiddleware.js";
 import { rateLimit } from "../middleware/rateLimit.js";
@@ -35,6 +36,9 @@ router.get("/repos", protect, getRepos);
 
 // POST /api/github/disconnect - Protected route to disconnect GitHub
 router.post("/disconnect", protect, disconnectGithub);
+
+// POST /api/github/webhook - GitHub push / pull_request events (signed with GITHUB_WEBHOOK_SECRET)
+router.post("/webhook", githubCallbackLimit, githubWebhook);
 
 // POST /api/github/analyze - Run Repository Intelligence Engine analysis
 router.post("/analyze", protect, githubAnalysisLimit, analyzeRepo);

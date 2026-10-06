@@ -11,23 +11,30 @@ import {
   Copy,
   Check,
   Globe,
-  Layers,
   ShieldCheck,
   Key,
   RotateCcw,
   Undo2,
-  Clock,
-  ListOrdered,
   AlertCircle,
-  HeartPulse,
   Trash2,
   Flame,
   Lock,
   Eye,
   EyeOff,
   X,
+  GitBranch,
+  GitCommitHorizontal,
+  Zap,
+  Settings2,
+  Loader2,
+  Lightbulb,
+  ArrowRight,
+  Wand2,
+  Search,
+  Download,
+  ArrowDownToLine,
+  History,
 } from "lucide-react";
-import Card from "../components/Card";
 import Button from "../components/Button";
 import {
   getProjectById,
@@ -42,7 +49,14 @@ import {
   destroyDeployment,
   destroyProjectInfrastructure,
   streamDeploymentLogs,
+  getDeploymentDiagnosis,
+  restoreDeploymentVersion,
+  saveProjectRuntime,
+  saveBuildMode,
 } from "../services/api";
+import StatusBadge from "../components/StatusBadge";
+import { stageDurations, stageInfo } from "../utils/stages";
+import { buttonClass, formatDuration, timeAgo } from "../utils/format";
 
 const TERMINAL_STATUSES = new Set([
   "LIVE",
@@ -83,14 +97,16 @@ const STAGE_STATUS = {
 };
 
 const STAGES = [
-  { id: "CLONING", label: "Cloning", desc: "Git repository source" },
-  { id: "BUILDING", label: "Building", desc: "Multi-stage Docker build" },
-  { id: "PUSHING", label: "Pushing", desc: "Push container to AWS ECR" },
-  { id: "PROVISIONING", label: "Provisioning", desc: "Terraform VPC & ECS" },
-  { id: "DEPLOYING", label: "Deploying", desc: "ECS Service Rollout" },
-  { id: "HEALTH_CHECK", label: "Health Check", desc: "HTTP 200 Probe & Latency" },
-  { id: "COMPLETE", label: "Live", desc: "Production traffic active" },
+  { id: "CLONING", label: "Download code", desc: "Fetching the branch from GitHub" },
+  { id: "BUILDING", label: "Build", desc: "Installing and building the app" },
+  { id: "PUSHING", label: "Upload image", desc: "Sending the container to AWS" },
+  { id: "PROVISIONING", label: "Set up AWS", desc: "Load balancer, network and service" },
+  { id: "DEPLOYING", label: "Roll out", desc: "Starting the new version" },
+  { id: "HEALTH_CHECK", label: "Health check", desc: "Making sure it answers" },
+  { id: "COMPLETE", label: "Live", desc: "Serving visitors" },
 ];
+
+const STATUS_LABELS = { LIVE: "Live", ROLLED_BACK: "Live (restored)", FAILED: "Failed", CANCELLED: "Cancelled", DESTROYED: "Removed", DESTROY_FAILED: "Teardown failed", QUEUED: "Queued", ROLLING_BACK: "Restoring" };
 
 const TARGET_LABELS = {
   AWS_ECS_FARGATE: "AWS ECS Fargate",
@@ -129,15 +145,48 @@ export default function DeploymentConsole() {
   const [deployBlockers, setDeployBlockers] = useState([]);
   const [copiedUrl, setCopiedUrl] = useState(false);
   const [copiedLogs, setCopiedLogs] = useState(false);
+  const [versions, setVersions] = useState([]);
+  const [restoringId, setRestoringId] = useState(null);
+  const [diagnosis, setDiagnosis] = useState({ id: null, data: null });
+  const [fixing, setFixing] = useState(null);
+  const [logSearch, setLogSearch] = useState("");
+  const [logLevel, setLogLevel] = useState("all");
+  const [followLogs, setFollowLogs] = useState(true);
+  const [now, setNow] = useState(() => Date.now());
+  const terminalRef = useRef(null);
 
-  const logsEndRef = useRef(null);
   const eventSourceRef = useRef(null);
   const pollIntervalRef = useRef(null);
   const pollInFlightRef = useRef(false);
 
+  // Keep the terminal pinned to the newest line unless the person scrolled up to read.
   useEffect(() => {
-    logsEndRef.current?.scrollIntoView({ behavior: "smooth" });
-  }, [logs]);
+    if (followLogs && terminalRef.current) terminalRef.current.scrollTop = terminalRef.current.scrollHeight;
+  }, [logs, followLogs, logSearch, logLevel]);
+
+  // A ticking clock so the running step's duration counts up.
+  const operationActive = ACTIVE_STATUSES.has(activeDeployment?.status);
+  useEffect(() => {
+    if (!operationActive) return undefined;
+    const timer = window.setInterval(() => setNow(Date.now()), 1000);
+    return () => window.clearInterval(timer);
+  }, [operationActive]);
+
+  // Plain-English explanation for a failed deployment.
+  const failedId = ["FAILED", "DESTROY_FAILED"].includes(activeDeployment?.status) ? activeDeployment.id : null;
+  useEffect(() => {
+    if (!failedId || diagnosis.id === failedId) return;
+    let cancelled = false;
+    getDeploymentDiagnosis(failedId)
+      .then((result) => !cancelled && setDiagnosis({ id: failedId, data: result.diagnosis }))
+      .catch(() => !cancelled && setDiagnosis({ id: failedId, data: null }));
+    return () => {
+      cancelled = true;
+    };
+  }, [failedId, diagnosis.id]);
+  const diagnosisFor = diagnosis.id && diagnosis.id === activeDeployment?.id ? diagnosis.data : null;
+
+  const loadVersions = () => getProjectDeployments(id).then(setVersions).catch(() => {});
 
   const stopPolling = () => {
     if (pollIntervalRef.current) window.clearInterval(pollIntervalRef.current);
@@ -148,6 +197,7 @@ export default function DeploymentConsole() {
   const settleTerminalState = (status) => {
     if (!TERMINAL_STATUSES.has(status)) return false;
     stopPolling();
+    void loadVersions();
     setDeploying(false);
     setRetrying(false);
     setRollingBack(false);
@@ -179,6 +229,7 @@ export default function DeploymentConsole() {
       ]);
 
       setProject(projData);
+      setVersions(Array.isArray(deployments) ? deployments : []);
       setAwsConnected(awsStatus.connected);
       setAwsData(awsStatus);
 
@@ -407,6 +458,42 @@ export default function DeploymentConsole() {
     }
   };
 
+  const handleRestore = async (version) => {
+    if (!window.confirm(`Put the version from ${new Date(version.createdAt).toLocaleString()} back live?`)) return;
+    setRestoringId(version.id);
+    setDeployError(null);
+    try {
+      const result = await restoreDeploymentVersion(version.id);
+      const servingId = result.deploymentId;
+      setLogs([]);
+      setActiveDeployment((previous) => ({ ...(previous?.id === servingId ? previous : versions.find((entry) => entry.id === servingId) || previous), id: servingId, status: "ROLLING_BACK", stage: "ROLLBACK" }));
+      subscribeToLogs(servingId);
+      startStatusPolling(servingId);
+    } catch (err) {
+      setDeployError(err.response?.data?.message || "That version could not be restored.");
+    } finally {
+      setRestoringId(null);
+    }
+  };
+
+  const openDeployment = async (deploymentId) => {
+    eventSourceRef.current?.abort();
+    stopPolling();
+    try {
+      const data = await getDeploymentById(deploymentId);
+      setActiveDeployment(data.deployment);
+      setLogs(data.logs || []);
+      navigate(`/project/${id}/deploy?deploymentId=${encodeURIComponent(deploymentId)}`, { replace: true });
+      if (ACTIVE_STATUSES.has(data.deployment?.status)) {
+        subscribeToLogs(deploymentId);
+        startStatusPolling(deploymentId);
+      }
+      window.scrollTo({ top: 0, behavior: "smooth" });
+    } catch (err) {
+      setDeployError(err.response?.data?.message || "Could not open that deployment.");
+    }
+  };
+
   const handleSaveAwsModalCredentials = async (e) => {
     e.preventDefault();
     if (!awsAccessKeyInput.trim() || !awsSecretKeyInput.trim()) {
@@ -495,10 +582,10 @@ export default function DeploymentConsole() {
   const isBuilding = Boolean(deploying || (!isDestroyed && !isDestroying && ["CLONING", "BUILDING", "PUSHING", "PROVISIONING", "DEPLOYING", "HEALTH_CHECK"].includes(activeDeployment?.status || activeDeployment?.stage)));
   const hasLiveEndpoint = isLive || isRolledBack;
   const liveUrl = activeDeployment?.liveUrl || null;
+  const customDomain = project?.customDomain?.status === "ACTIVE" ? `https://${project.customDomain.domain}` : null;
   const healthStatus = activeDeployment?.healthStatus || "UNKNOWN";
-  const latency = Number.isInteger(activeDeployment?.latencyMs) ? `${activeDeployment.latencyMs}ms` : "Not measured";
+  const latency = Number.isInteger(activeDeployment?.latencyMs) ? `${activeDeployment.latencyMs} ms` : "not measured yet";
 
-  // Calculate current stage index
   const stageIndex = STAGES.findIndex((s) => s.id === currentStage);
   const activeIdx = stageIndex >= 0
     ? stageIndex
@@ -509,630 +596,403 @@ export default function DeploymentConsole() {
         : 0;
   const queuePositionLabel = Number.isInteger(queueInfo.position) ? `#${queueInfo.position}` : "starting";
 
+  // Step timings: finished steps from the worker's record, the running step counts up live.
+  const timings = Array.isArray(activeDeployment?.stageTimings) ? activeDeployment.stageTimings : [];
+  const timingEnd = activeDeployment?.completedAt || (isBuilding || isQueued ? now : null);
+  const durationByStage = Object.fromEntries(stageDurations(timings, timingEnd).map((entry) => [entry.stage, entry.ms]));
+  const startedAt = activeDeployment?.startedAt || timings[0]?.at || null;
+  const elapsed = startedAt ? (activeDeployment?.completedAt ? new Date(activeDeployment.completedAt) : new Date(now)) - new Date(startedAt) : null;
+  const progressPercent = hasLiveEndpoint ? 100 : Math.round((Math.max(0, activeIdx) / (STAGES.length - 1)) * 100);
+
+  const statusPill = isDestroyed ? { label: "Removed from AWS", state: "destroyed" }
+    : isDestroying ? { label: "Removing from AWS…", state: "working" }
+    : isLive ? { label: "Live", state: "live" }
+    : isRolledBack ? { label: "Live (restored version)", state: "live" }
+    : isFailed ? { label: isDestroyFailed ? "Teardown failed" : activeDeployment?.status === "CANCELLED" ? "Cancelled" : "Failed", state: "failed" }
+    : isQueued ? { label: `Queued ${queuePositionLabel}`, state: "working" }
+    : isRollingBack ? { label: "Restoring…", state: "working" }
+    : isBuilding ? { label: "Deploying…", state: "working" }
+    : { label: activeDeployment ? "Ready" : "Not deployed yet", state: "idle" };
+
+  const levelOf = (log) => (log.level === "error" || log.stage === "FAILED" ? "error" : log.level === "warn" || log.stage === "ROLLBACK" ? "warn" : log.level === "success" || log.stage === "LIVE" ? "success" : "info");
+  const search = logSearch.trim().toLowerCase();
+  const visibleLogs = logs.filter((log) => {
+    const level = levelOf(log);
+    if (logLevel === "error" && level !== "error") return false;
+    if (logLevel === "warn" && !["error", "warn"].includes(level)) return false;
+    return !search || String(log.message || "").toLowerCase().includes(search) || String(log.stage || "").toLowerCase().includes(search);
+  });
+  const errorCount = logs.filter((log) => levelOf(log) === "error").length;
+  const restorable = versions.filter((version) => version.restorable);
+  const current = versions.find((version) => version.isCurrent);
+
+  const applyFix = async (fix) => {
+    setFixing(fix.label);
+    try {
+      if (fix.kind === "retry") await handleRetryDeploy();
+      else if (fix.kind === "link") navigate(fix.to);
+      else if (fix.kind === "runtime") {
+        await saveProjectRuntime(id, fix.patch);
+        setProject(await getProjectById(id));
+        if (fix.redeploy) await handleTriggerDeploy();
+      } else if (fix.kind === "buildMode") {
+        await saveBuildMode(id, fix.mode);
+        await handleRetryDeploy();
+      }
+    } catch (error) {
+      setDeployError(error.response?.data?.message || "That fix could not be applied.");
+    } finally {
+      setFixing(null);
+    }
+  };
+
+  const downloadLogs = () => {
+    const text = logs.map((entry) => `[${entry.timestamp}] [${entry.stage}] ${entry.message}`).join("\n");
+    const url = URL.createObjectURL(new Blob([text], { type: "text/plain" }));
+    const link = Object.assign(document.createElement("a"), { href: url, download: `${project?.name || "deployment"}-${activeDeployment?.id?.slice(-8) || "logs"}.log` });
+    link.click();
+    URL.revokeObjectURL(url);
+  };
+
+  const highlight = (text) => {
+    if (!search) return text;
+    const value = String(text);
+    const index = value.toLowerCase().indexOf(search);
+    if (index < 0) return value;
+    return <>{value.slice(0, index)}<mark className="rounded bg-[#FBBF24] px-0.5 text-[#1A1411]">{value.slice(index, index + search.length)}</mark>{value.slice(index + search.length)}</>;
+  };
+
+  const primaryAction = isDestroyFailed
+    ? { kind: "teardown", label: "Retry teardown", icon: RefreshCw, busy: destroying, danger: true }
+    : canRetryDeployment
+      ? { kind: "retry", label: "Try again", icon: RotateCcw, busy: retrying }
+      : !project?.deploymentTarget
+        ? { kind: "target", label: "Choose where to deploy", icon: Rocket }
+        : { kind: "deploy", label: hasLiveEndpoint ? "Redeploy" : "Deploy now", icon: Rocket, busy: deploying || isQueued, disabled: isActiveOperation || destroying };
+  const PrimaryIcon = primaryAction.icon;
+  const primaryKind = primaryAction.kind;
+  const runPrimary = () => {
+    if (primaryKind === "teardown") return handleDestroy();
+    if (primaryKind === "retry") return handleRetryDeploy();
+    if (primaryKind === "target") return navigate(`/project/${id}/infrastructure`);
+    return handleTriggerDeploy();
+  };
+
   return (
-    <div className="flex flex-col gap-8 max-w-6xl mx-auto pb-16">
-      {/* Header & Breadcrumb */}
-      <div className="flex flex-col md:flex-row md:items-center justify-between gap-4 border-b border-[#EADFCF] pb-6">
-        <div className="flex flex-col gap-2">
+    <div className="mx-auto flex max-w-6xl flex-col gap-6 pb-16">
+      {/* Header */}
+      <div className="flex flex-col gap-4 lg:flex-row lg:items-start lg:justify-between">
+        <div className="flex min-w-0 flex-col gap-2">
           <div className="flex items-center gap-2 text-xs font-semibold text-[#8C7667]">
-            <Link to="/dashboard/projects" className="hover:text-[#362217] transition-colors">
-              Projects
-            </Link>
+            <Link to="/dashboard/projects" className="transition-colors hover:text-[#362217]">Projects</Link>
             <span>/</span>
-            <span className="text-[#362217]">{project?.name || "Project"}</span>
-            <span>/</span>
-            <span className="text-[#9E5D2D] font-bold">Deployment Pipeline</span>
+            <span className="truncate text-[#362217]">{project?.name || "Project"}</span>
           </div>
-
           <div className="flex flex-wrap items-center gap-3">
-            <h1 className="text-2xl md:text-3xl font-bold text-[#362217] flex items-center gap-2.5">
+            <h1 className="flex items-center gap-2.5 text-2xl font-bold text-[#362217] md:text-3xl">
               <Rocket className="h-7 w-7 text-[#9E5D2D]" />
-              Deployment Console
+              {project?.name || "Deployment"}
             </h1>
-            <span className="text-xs px-2.5 py-1 rounded-full bg-[#9E5D2D]/10 text-[#9E5D2D] font-bold border border-[#9E5D2D]/20">
-              {project?.framework || "React"}
-            </span>
-
-            {/* Status Pill */}
-            <span
-              className={`text-xs px-2.5 py-1 rounded-full font-bold border flex items-center gap-1.5 ${
-                isDestroyed
-                  ? "bg-[#362217]/10 text-[#362217] border-[#362217]/25"
-                  : isDestroying
-                  ? "bg-[#9E2A2B]/15 text-[#9E2A2B] border-[#9E2A2B]/40 animate-pulse"
-                  : isLive
-                  ? "bg-[#2E6B4F]/10 text-[#2E6B4F] border-[#2E6B4F]/20"
-                  : isFailed
-                  ? "bg-[#9E2A2B]/10 text-[#9E2A2B] border-[#9E2A2B]/20"
-                  : isQueued
-                  ? "bg-[#D97706]/10 text-[#D97706] border-[#D97706]/20"
-                  : isRollingBack
-                  ? "bg-[#6D28D9]/10 text-[#6D28D9] border-[#6D28D9]/20"
-                  : isRolledBack
-                  ? "bg-[#2563EB]/10 text-[#2563EB] border-[#2563EB]/20"
-                  : deploying
-                  ? "bg-[#B45309]/10 text-[#B45309] border-[#B45309]/20"
-                  : "bg-[#F5EFE6] text-[#5E4C3E] border-[#EADFCF]"
-              }`}
-            >
-              {isDestroyed ? (
-                <Trash2 className="h-3.5 w-3.5" />
-              ) : isDestroying ? (
-                <Flame className="h-3.5 w-3.5 text-[#9E2A2B] animate-bounce" />
-              ) : isLive ? (
-                <CheckCircle2 className="h-3.5 w-3.5" />
-              ) : isFailed ? (
-                <AlertCircle className="h-3.5 w-3.5" />
-              ) : isQueued ? (
-                <ListOrdered className="h-3.5 w-3.5 animate-pulse" />
-              ) : (
-                <Activity className="h-3.5 w-3.5 animate-pulse" />
-              )}
-              {isDestroyed
-                ? "All AWS Resources Destroyed"
-                : isDestroying
-                ? "Tearing Down AWS..."
-                : isLive
-                ? "Live in Production"
-                : isFailed
-                ? "Execution Paused"
-                : isQueued
-                ? `Queued (Pos ${queuePositionLabel})`
-                : isRollingBack
-                ? "Rolling Back..."
-                : isRolledBack
-                ? "Restored (Rolled Back)"
-                : deploying
-                ? "Worker Executing"
-                : "Ready to Deploy"}
-            </span>
-
-            <span className="text-xs px-2.5 py-1 rounded-full bg-[#362217] text-[#FAF6F0] font-semibold">
-              Target: {TARGET_LABELS[project?.deploymentTarget] || "not chosen yet"}
-            </span>
+            <StatusBadge state={statusPill.state} label={statusPill.label} />
           </div>
-
-          <p className="text-sm text-[#5E4C3E]">
-            Production-grade asynchronous deployment queue powered by BullMQ & Redis, dedicated workers, and real-time SSE telemetry.
+          <p className="flex flex-wrap items-center gap-x-3 gap-y-1 text-xs text-[#5E4C3E]">
+            <span>{TARGET_LABELS[project?.deploymentTarget] || "No target chosen yet"}</span>
+            {project?.branch && <span className="inline-flex items-center gap-1 font-mono"><GitBranch className="h-3.5 w-3.5" /> {project.branch}</span>}
+            {activeDeployment?.commitSha && (
+              <a href={`https://github.com/${project?.repoName}/commit/${activeDeployment.commitSha}`} target="_blank" rel="noreferrer" className="inline-flex min-w-0 items-center gap-1 hover:text-[#9E5D2D]">
+                <GitCommitHorizontal className="h-3.5 w-3.5" />
+                <span className="font-mono">{activeDeployment.commitSha.slice(0, 7)}</span>
+                <span className="max-w-[18rem] truncate">{activeDeployment.commitMessage?.split("\n")[0]}</span>
+              </a>
+            )}
+            {project?.autoDeploy && <span className="inline-flex items-center gap-1 rounded-full bg-[#2563EB]/10 px-2 py-0.5 text-[10px] font-semibold text-[#1D4ED8]"><Zap className="h-3 w-3" /> Auto-deploy on push</span>}
           </p>
         </div>
 
-        <div className="flex items-center gap-2.5 shrink-0 flex-wrap">
-          <Button
-            variant="outline"
-            onClick={() => navigate(`/project/${id}/infrastructure`)}
-            className="border-[#EADFCF] bg-white text-[#5E4C3E]"
-          >
-            Terraform IaC
-          </Button>
-
-          <Button
-            variant="outline"
-            onClick={() => navigate(`/project/${id}/security`)}
-            className="border-[#EADFCF] bg-white text-[#5E4C3E] flex items-center gap-1.5"
-          >
-            <ShieldCheck className="h-4 w-4 text-[#9E5D2D]" />
-            Security & Uptime
-          </Button>
-
-          {hasLiveEndpoint && (
-            <Button
-              variant="outline"
-              onClick={() => setShowRollbackModal(true)}
-              loading={rollingBack}
-              disabled={rollingBack || destroying}
-              className="border-[#6D28D9]/30 text-[#6D28D9] hover:bg-[#6D28D9]/10 font-semibold flex items-center gap-1.5"
-            >
-              <Undo2 className="h-4 w-4" />
-              Rollback
-            </Button>
-          )}
-
-          <Button
-            variant="outline"
-            onClick={() => setShowDestroyModal(true)}
-            loading={destroying}
-            disabled={destroying || isBuilding || isRollingBack}
-            className="border-[#9E2A2B]/40 text-[#9E2A2B] hover:bg-[#9E2A2B]/10 hover:border-[#9E2A2B] font-semibold flex items-center gap-1.5 shadow-xs transition-colors"
-          >
-            <Trash2 className="h-4 w-4 text-[#9E2A2B]" />
-            One-Click Destroy
-          </Button>
-
-          {isDestroyFailed ? (
-            <Button
-              onClick={handleDestroy}
-              loading={destroying}
-              disabled={destroying}
-              className="bg-[#9E2A2B] hover:bg-[#7E2223] text-white flex items-center gap-2 shadow-sm font-bold"
-            >
-              <RefreshCw className="h-4 w-4" />
-              Retry Teardown
-            </Button>
-          ) : canRetryDeployment ? (
-            <Button
-              onClick={handleRetryDeploy}
-              loading={retrying}
-              disabled={retrying || destroying}
-              className="bg-[#D97706] hover:bg-[#B45309] text-white flex items-center gap-2 shadow-sm font-bold"
-            >
-              <RotateCcw className="h-4 w-4" />
-              Retry Deployment
-            </Button>
-          ) : !project?.deploymentTarget ? (
-            <Button
-              onClick={() => navigate(`/project/${id}/infrastructure`)}
-              className="bg-[#9E5D2D] hover:bg-[#844C22] text-white flex items-center gap-2 shadow-sm font-bold"
-            >
-              <Rocket className="h-4 w-4" />
-              Choose a deployment target
-            </Button>
-          ) : (
-            <Button
-              onClick={handleTriggerDeploy}
-              loading={deploying || isQueued || destroying}
-              disabled={deploying || isQueued || destroying || isActiveOperation}
-              className="bg-[#9E5D2D] hover:bg-[#844C22] text-white flex items-center gap-2 shadow-sm font-bold"
-            >
-              <Rocket className="h-4 w-4" />
-              {hasLiveEndpoint ? "Redeploy Pipeline" : isDestroyed ? "Deploy Clean Architecture" : "Deploy to AWS Now"}
-            </Button>
-          )}
+        <div className="flex shrink-0 flex-wrap items-center gap-2">
+          <Link to={`/project/${id}/monitor`} className={buttonClass.secondary}><Activity className="h-3.5 w-3.5" /> Monitoring</Link>
+          <Link to={`/project/${id}/settings`} className={buttonClass.secondary}><Settings2 className="h-3.5 w-3.5" /> Site settings</Link>
+          <Link to={`/project/${id}/security`} className={buttonClass.secondary}><ShieldCheck className="h-3.5 w-3.5" /> Security</Link>
+          <button type="button" onClick={() => setShowDestroyModal(true)} disabled={destroying || isBuilding || isRollingBack} className={buttonClass.danger}>
+            <Trash2 className="h-3.5 w-3.5" /> Destroy
+          </button>
+          <button type="button" onClick={runPrimary} disabled={primaryAction.busy || primaryAction.disabled} className={primaryAction.danger ? "inline-flex items-center gap-1.5 rounded-xl bg-[#9E2A2B] px-4 py-2 text-xs font-semibold text-white shadow-sm transition hover:bg-[#7E2223] disabled:opacity-60" : buttonClass.primary}>
+            {primaryAction.busy ? <Loader2 className="h-3.5 w-3.5 animate-spin" /> : <PrimaryIcon className="h-3.5 w-3.5" />} {primaryAction.label}
+          </button>
         </div>
       </div>
 
-      {/* Preflight Blockers Alert */}
+      {/* Preflight blockers and request errors */}
       {(deployError || deployBlockers.length > 0) && (
-        <div className="p-5 rounded-2xl bg-[#9E2A2B]/10 border border-[#9E2A2B]/30 flex flex-col gap-3 text-xs text-[#7E2223] animate-in fade-in">
+        <div className="page-enter flex flex-col gap-3 rounded-3xl border border-[#9E2A2B]/30 bg-[#9E2A2B]/5 p-5 text-xs text-[#7E2223]">
           <div className="flex items-start justify-between gap-3">
             <div className="flex items-start gap-3">
-              <div className="p-2 rounded-xl bg-[#9E2A2B]/20 text-[#9E2A2B] shrink-0 mt-0.5">
-                <AlertTriangle className="h-5 w-5" />
-              </div>
+              <AlertTriangle className="mt-0.5 h-5 w-5 shrink-0 text-[#9E2A2B]" />
               <div>
-                <span className="font-bold text-[#7E2223] text-sm">
-                  {deployError || "Deployment Preflight Blocked"}
-                </span>
-                {deployBlockers.length > 0 ? (
-                  <>
-                    <p className="text-xs text-[#9E2A2B] mt-0.5">
-                      The following requirements must be resolved before deploying:
-                    </p>
-                    <ul className="list-disc list-inside mt-2 space-y-1 font-medium text-[#7E2223]">
-                      {deployBlockers.map((blocker, idx) => (
-                        <li key={idx}>{blocker}</li>
-                      ))}
-                    </ul>
-                  </>
-                ) : (
-                  <p className="text-xs text-[#9E2A2B] mt-0.5">
-                    Please review your project configuration or AWS connection settings.
-                  </p>
+                <p className="text-sm font-bold">{deployError || "Something needs fixing before this can deploy"}</p>
+                {deployBlockers.length > 0 && (
+                  <ul className="mt-2 list-inside list-disc space-y-1 font-medium">
+                    {deployBlockers.map((blocker) => <li key={blocker}>{blocker}</li>)}
+                  </ul>
                 )}
               </div>
             </div>
-            <button
-              aria-label="Dismiss deployment notice"
-              onClick={() => { setDeployError(null); setDeployBlockers([]); }}
-              className="p-1 rounded-lg text-[#9E2A2B] hover:bg-[#9E2A2B]/20 transition"
-              title="Dismiss notice"
-            >
-              <X className="h-4 w-4" />
-            </button>
+            <button aria-label="Dismiss" onClick={() => { setDeployError(null); setDeployBlockers([]); }} className="rounded-lg p-1 text-[#9E2A2B] transition hover:bg-[#9E2A2B]/15"><X className="h-4 w-4" /></button>
           </div>
-          <div className="flex items-center gap-3 pt-2 border-t border-[#9E2A2B]/20">
-            {deployBlockers.some((b) => /aws|credentials|account/i.test(b)) && (
-              <Button
-                size="sm"
-                className="bg-[#2E6B4F] hover:bg-[#24543D] text-white font-bold flex items-center gap-1.5"
-                onClick={() => setShowAwsModal(true)}
-              >
-                <ShieldCheck className="h-4 w-4" />
-                Connect AWS Credentials
-              </Button>
+          {(deployBlockers.some((b) => /aws|credentials|account/i.test(b)) || deployBlockers.some((b) => /environment variable/i.test(b))) && (
+            <div className="flex flex-wrap gap-2 border-t border-[#9E2A2B]/15 pt-3">
+              {deployBlockers.some((b) => /aws|credentials|account/i.test(b)) && <button type="button" onClick={() => setShowAwsModal(true)} className={buttonClass.primary}><ShieldCheck className="h-3.5 w-3.5" /> Connect AWS</button>}
+              {deployBlockers.some((b) => /environment variable/i.test(b)) && <button type="button" onClick={() => navigate(`/project/${id}/plan`)} className={buttonClass.secondary}>Add environment variables</button>}
+            </div>
+          )}
+        </div>
+      )}
+
+      {/* What went wrong, in plain English */}
+      {isFailed && activeDeployment?.status !== "CANCELLED" && (
+        <div className="page-enter overflow-hidden rounded-3xl border border-[#9E2A2B]/30 bg-white">
+          <div className="flex items-start gap-3 border-b border-[#9E2A2B]/15 bg-[#9E2A2B]/5 px-5 py-4">
+            <span className="flex h-9 w-9 shrink-0 items-center justify-center rounded-full bg-[#9E2A2B] text-white"><Lightbulb className="h-4.5 w-4.5 h-[18px] w-[18px]" /></span>
+            <div className="min-w-0">
+              <p className="text-[10px] font-bold uppercase tracking-wider text-[#9E2A2B]">What went wrong</p>
+              <h3 className="text-base font-bold text-[#362217]">{diagnosisFor?.title || (isDestroyFailed ? "The teardown didn't finish" : "Working out what went wrong…")}</h3>
+            </div>
+          </div>
+          <div className="flex flex-col gap-4 p-5">
+            {diagnosisFor ? (
+              <>
+                <p className="text-sm leading-relaxed text-[#5E4C3E]">{diagnosisFor.explanation}</p>
+                {diagnosisFor.steps?.length > 0 && (
+                  <ol className="flex flex-col gap-1.5">
+                    {diagnosisFor.steps.map((step, index) => (
+                      <li key={step} className="flex items-start gap-2 text-xs text-[#362217]">
+                        <span className="flex h-5 w-5 shrink-0 items-center justify-center rounded-full bg-[#F0E7DC] text-[10px] font-bold text-[#5E4C3E]">{index + 1}</span>
+                        <span className="pt-0.5">{step}</span>
+                      </li>
+                    ))}
+                  </ol>
+                )}
+                {diagnosisFor.fixes?.length > 0 && (
+                  <div className="flex flex-wrap gap-2">
+                    {diagnosisFor.fixes.map((fix, index) => (
+                      <button key={fix.label} type="button" disabled={Boolean(fixing)} onClick={() => applyFix(fix)} className={index === 0 ? buttonClass.primary : buttonClass.secondary}>
+                        {fixing === fix.label ? <Loader2 className="h-3.5 w-3.5 animate-spin" /> : fix.kind === "retry" ? <RotateCcw className="h-3.5 w-3.5" /> : fix.kind === "link" ? <ArrowRight className="h-3.5 w-3.5" /> : <Wand2 className="h-3.5 w-3.5" />}
+                        {fix.label}
+                      </button>
+                    ))}
+                  </div>
+                )}
+              </>
+            ) : isDestroyFailed ? (
+              <p className="text-sm text-[#5E4C3E]">Some AWS resources may still exist. Retrying is safe: SkyForge checks each one and only deletes what's left.</p>
+            ) : <div className="skeleton h-12" />}
+            {activeDeployment?.error && (
+              <details className="rounded-2xl bg-[#FAF8F5] px-3 py-2 text-[11px] text-[#5E4C3E]">
+                <summary className="cursor-pointer font-semibold">Technical details</summary>
+                <p className="mt-2 whitespace-pre-wrap break-all font-mono">{activeDeployment.error}</p>
+              </details>
             )}
-            {deployBlockers.some((b) => /environment variable/i.test(b)) && (
-              <Button
-                size="sm"
-                variant="outline"
-                className="border-[#9E2A2B]/40 text-[#9E2A2B] hover:bg-[#9E2A2B]/10 font-bold"
-                onClick={() => navigate(`/project/${id}/plan`)}
-              >
-                Configure Environment Variables
-              </Button>
-            )}
           </div>
         </div>
       )}
 
-      {/* Queue Position Alert (When Queued) */}
-      {isQueued && (
-        <div className="p-4 rounded-2xl bg-[#D97706]/10 border border-[#D97706]/30 flex items-center justify-between text-xs text-[#92400E]">
-          <div className="flex items-center gap-3">
-            <div className="p-2 rounded-xl bg-[#D97706]/20 text-[#D97706]">
-              <ListOrdered className="h-5 w-5 animate-bounce" />
-            </div>
-            <div>
-              <span className="font-bold text-[#78350F] text-sm">
-                Asynchronous Job Enqueued in BullMQ (Position {queuePositionLabel})
-              </span>
-              <p className="text-xs text-[#92400E] mt-0.5">
-                The Express API created your deployment job and returned immediately. A dedicated background worker is allocating container resources...
-              </p>
-            </div>
-          </div>
-          <div className="flex items-center gap-2 font-mono font-bold">
-            <Clock className="h-4 w-4" />
-            <span>Waiting in queue...</span>
-          </div>
-        </div>
-      )}
-
-      {/* Step-Level Retry Banner (When Failed) */}
-      {isFailed && (
-        <div className="p-5 rounded-2xl bg-[#9E2A2B]/10 border border-[#9E2A2B]/30 flex flex-col sm:flex-row sm:items-center justify-between gap-4 text-xs text-[#7E2223]">
-          <div className="flex items-start gap-3">
-            <div className="p-2 rounded-xl bg-[#9E2A2B]/20 text-[#9E2A2B] shrink-0 mt-0.5">
-              <AlertCircle className="h-5 w-5" />
-            </div>
-            <div>
-              <span className="font-bold text-[#7E2223] text-sm">
-                {isDestroyFailed
-                  ? "Infrastructure teardown did not complete"
-                  : `Deployment Paused at Step: ${activeDeployment?.currentStep || "BUILDING"}`}
-              </span>
-              <p className="text-xs text-[#9E2A2B] mt-1 font-mono">
-                Reason: {activeDeployment?.error || (isDestroyFailed ? "Cloud resources may still exist." : "Pipeline interrupted during execution.")}
-              </p>
-              <p className="text-[11px] text-[#5E4C3E] mt-1">
-                {isDestroyFailed
-                  ? "Retry the idempotent teardown worker. SkyForge will verify each recorded AWS resource is gone before marking the project destroyed."
-                  : "SkyForge reruns the verified clone, build, push, provisioning, deployment, and health-check pipeline so every artifact is reproducible."}
-              </p>
-            </div>
-          </div>
-          <Button
-            size="sm"
-            onClick={isDestroyFailed ? handleDestroy : handleRetryDeploy}
-            loading={isDestroyFailed ? destroying : retrying}
-            disabled={isDestroyFailed ? destroying : retrying || destroying}
-            className="bg-[#9E2A2B] hover:bg-[#7E2223] text-white shrink-0 font-bold flex items-center gap-2"
-          >
-            {isDestroyFailed ? <RefreshCw className="h-4 w-4" /> : <RotateCcw className="h-4 w-4" />}
-            {isDestroyFailed ? "Retry Teardown" : "Retry Full Pipeline"}
-          </Button>
-        </div>
-      )}
-
-      {/* AWS Connection Status Pill */}
-      <div className="p-4 rounded-2xl bg-[#FAF8F5] border border-[#EAE1D5] flex flex-col sm:flex-row sm:items-center justify-between gap-3 text-xs">
-        <div className="flex items-center gap-3">
-          <div className="p-2 rounded-xl bg-[#2E6B4F]/10 text-[#2E6B4F]">
-            <ShieldCheck className="h-5 w-5" />
-          </div>
+      {/* Progress */}
+      <section className="rounded-3xl border border-[#EAE1D5] bg-white p-5 sm:p-6">
+        <div className="mb-5 flex flex-wrap items-end justify-between gap-3">
           <div>
-            <div className="flex items-center gap-2">
-              <span className="font-bold text-[#362217]">AWS Cloud Account: </span>
-              {awsConnected && (
-                <span className="text-[10px] px-2 py-0.5 rounded-full bg-[#2E6B4F]/15 text-[#2E6B4F] font-bold">
-                  {awsData?.authType === "ACCESS_KEYS" || awsData?.hasAccessKeys
-                    ? "Direct IAM Keys"
-                    : "IAM Role"}
-                </span>
-              )}
-            </div>
-            <span className="font-mono text-[#5E4C3E]">
-              {awsConnected
-                ? `Account: ${awsData?.accountId || "connected account"} (${awsData?.region || "configured region"})${
-                    awsData?.maskedAccessKey ? ` • Key: ${awsData.maskedAccessKey}` : ""
-                  }`
-                : "No AWS account connected — connect credentials to deploy"}
-            </span>
+            <h3 className="text-base font-bold text-[#362217]">{isBuilding || isQueued ? "Deploying" : hasLiveEndpoint ? "Last deploy" : isFailed ? "Stopped" : "Pipeline"}</h3>
+            <p className="text-xs text-[#5E4C3E]">
+              {isQueued ? `Waiting for a worker (${queuePositionLabel} in line)…`
+                : isBuilding ? `${STAGES[activeIdx]?.label || "Working"}: ${STAGES[activeIdx]?.desc || ""}`
+                : hasLiveEndpoint ? `Finished ${activeDeployment?.completedAt ? timeAgo(activeDeployment.completedAt) : ""}`
+                : isFailed ? `Stopped at: ${STAGES[activeIdx]?.label || activeDeployment?.currentStep}`
+                : "Press Deploy to build and launch the site."}
+            </p>
           </div>
+          {elapsed !== null && <span className="font-mono text-2xl font-bold text-[#362217]">{formatDuration(elapsed)}</span>}
         </div>
 
-        <div className="flex items-center gap-2.5">
-          <button
-            type="button"
-            onClick={() => {
-              setAwsRegionInput(awsData?.region || "ap-south-1");
-              setShowAwsModal(true);
-            }}
-            className="text-xs font-bold px-3 py-1.5 rounded-lg bg-[#9E5D2D] text-white hover:bg-[#844C22] transition flex items-center gap-1.5 shadow-xs cursor-pointer"
-          >
-            <Key className="h-3.5 w-3.5" />
-            {awsConnected ? "Update AWS Keys" : "Connect AWS Keys"}
-          </button>
-          <Link
-            to="/dashboard/settings"
-            className="text-xs font-semibold text-[#8C7667] hover:text-[#362217] hover:underline"
-          >
-            Full Settings →
-          </Link>
-        </div>
-      </div>
-
-      {/* Stage Stepper Pipeline */}
-      <Card glow={false} className="bg-white border border-[#EAE1D5] flex flex-col gap-4">
-        <div className="flex items-center justify-between border-b border-[#EADFCF] pb-3">
-          <div className="flex items-center gap-2.5">
-            <div className="p-2 rounded-xl bg-[#9E5D2D]/10 text-[#9E5D2D]">
-              <Layers className="h-4 w-4" />
-            </div>
-            <div>
-              <h3 className="text-base font-bold text-[#362217]">Deployment Pipeline Stages</h3>
-              <p className="text-xs text-[#5E4C3E]">
-                Autonomous execution of containerization, registry distribution, and infrastructure synthesis.
-              </p>
-            </div>
-          </div>
-          <span className="text-xs font-mono font-bold text-[#9E5D2D]">
-            {deploying ? "Status: Worker Active" : isQueued ? "Status: Queued" : hasLiveEndpoint ? "Status: Deployed" : isFailed ? "Status: Paused" : "Status: Idle"}
-          </span>
+        <div className="relative mb-4 h-2 overflow-hidden rounded-full bg-[#F0E7DC]">
+          <div className={`h-full rounded-full transition-all duration-700 ${isFailed ? "bg-[#C2412D]" : hasLiveEndpoint ? "bg-[#2E6B4F]" : "bg-[#9E5D2D]"}`} style={{ width: `${isFailed ? Math.max(8, progressPercent) : progressPercent}%` }} />
+          {(isBuilding || isQueued) && <div className="progress-sheen absolute inset-0" />}
         </div>
 
-        <div className="grid grid-cols-2 sm:grid-cols-4 lg:grid-cols-7 gap-3">
-          {STAGES.map((s, idx) => {
-            const isPassed = hasLiveEndpoint || (!isFailed && idx < activeIdx);
-            const isCurrent = (deploying || isQueued) && idx === activeIdx;
-            const isStepFailed = isFailed && idx === activeIdx;
-
+        <ol className="grid grid-cols-2 gap-2 sm:grid-cols-4 lg:grid-cols-7">
+          {STAGES.map((stage, idx) => {
+            const done = hasLiveEndpoint || (!isFailed && idx < activeIdx) || (isFailed && idx < activeIdx);
+            const running = (isBuilding || isQueued) && idx === activeIdx;
+            const failedHere = isFailed && !isDestroyFailed && idx === activeIdx;
+            const ms = durationByStage[stage.id];
             return (
-              <div
-                key={s.id}
-                className={`p-3 rounded-2xl border transition-all flex flex-col gap-1.5 ${
-                  isPassed
-                    ? "bg-[#2E6B4F]/5 border-[#2E6B4F]/30 text-[#2E6B4F]"
-                    : isStepFailed
-                    ? "bg-[#9E2A2B]/10 border-[#9E2A2B] text-[#9E2A2B] ring-2 ring-[#9E2A2B]/20"
-                    : isCurrent
-                    ? "bg-[#9E5D2D]/10 border-[#9E5D2D] text-[#9E5D2D] ring-2 ring-[#9E5D2D]/20 animate-pulse"
-                    : "bg-[#FAF8F5] border-[#EADFCF] text-[#8C7667]"
-                }`}
-              >
+              <li key={stage.id} className={`flex flex-col gap-1 rounded-2xl border p-3 transition-all ${failedHere ? "border-[#9E2A2B]/50 bg-[#9E2A2B]/5" : running ? "border-[#9E5D2D] bg-[#9E5D2D]/5 ring-2 ring-[#9E5D2D]/15" : done ? "border-[#2E6B4F]/25 bg-[#2E6B4F]/5" : "border-[#EADFCF] bg-[#FAF8F5]"}`}>
                 <div className="flex items-center justify-between">
-                  <span className="text-[10px] font-bold uppercase tracking-wider font-mono">
-                    0{idx + 1}
-                  </span>
-                  {isPassed ? (
-                    <CheckCircle2 className="h-4 w-4 text-[#2E6B4F]" />
-                  ) : isStepFailed ? (
-                    <AlertCircle className="h-4 w-4 text-[#9E2A2B]" />
-                  ) : isCurrent ? (
-                    <Activity className="h-4 w-4 text-[#9E5D2D]" />
-                  ) : (
-                    <div className="h-2 w-2 rounded-full bg-[#DCD0C3]" />
-                  )}
+                  {done ? <CheckCircle2 className="h-4 w-4 text-[#2E6B4F]" /> : failedHere ? <AlertCircle className="h-4 w-4 text-[#9E2A2B]" /> : running ? <Loader2 className="h-4 w-4 animate-spin text-[#9E5D2D]" /> : <span className="h-2 w-2 rounded-full bg-[#DCD0C3]" />}
+                  {ms !== undefined && <span className="font-mono text-[10px] text-[#8C7667]">{formatDuration(ms)}</span>}
                 </div>
-                <span className="text-xs font-bold text-[#362217]">{s.label}</span>
-                <span className="text-[10px] text-[#8C7667] leading-tight">{s.desc}</span>
-              </div>
+                <span className="text-xs font-bold text-[#362217]">{stage.label}</span>
+                <span className="text-[10px] leading-tight text-[#8C7667]">{stage.desc}</span>
+              </li>
             );
           })}
-        </div>
-      </Card>
+        </ol>
+      </section>
 
-      {/* Live Application Card (When Live) */}
+      {/* Live site */}
       {hasLiveEndpoint && (
-        <div className="p-6 rounded-3xl bg-gradient-to-r from-[#2E6B4F]/10 via-white to-[#2E6B4F]/10 border-2 border-[#2E6B4F]/40 shadow-sm flex flex-col md:flex-row items-center justify-between gap-5">
-          <div className="flex items-start gap-4">
-            <div className="p-3.5 rounded-2xl bg-[#2E6B4F] text-white shadow-sm shrink-0">
-              <Globe className="h-7 w-7" />
-            </div>
-            <div className="flex flex-col gap-1">
-              <div className="flex items-center gap-2">
-                <span className="text-xs font-bold text-[#2E6B4F] uppercase tracking-wider">
-                  Live Application Endpoint
-                </span>
-                <span className={`text-[10px] px-2 py-0.5 rounded-md font-bold ${healthStatus === "HEALTHY" ? "bg-[#2E6B4F] text-white" : "bg-[#D97706] text-white"}`}>
-                  {healthStatus === "HEALTHY" ? "Verified healthy" : `Health: ${healthStatus}`}
-                </span>
-              </div>
-              <h3 className="text-lg font-bold text-[#362217] font-mono">{liveUrl || "Endpoint unavailable"}</h3>
-              <div className="flex flex-wrap items-center gap-4 text-xs text-[#5E4C3E] mt-1 font-mono">
-                <span>Latency: <strong>{latency}</strong></span>
-                <span>•</span>
-                <span>Target: <strong>{activeDeployment?.target || project?.deploymentTarget || "AWS"}</strong></span>
-              </div>
-            </div>
-          </div>
-
-          <div className="flex items-center gap-2.5 shrink-0">
-            {liveUrl && (
-              <>
-                <Button
-                  variant="outline"
-                  size="sm"
-                  onClick={() => handleCopyUrl(liveUrl)}
-                  className="text-xs flex items-center gap-1.5 bg-white border-[#EADFCF]"
-                >
-                  {copiedUrl ? <Check className="h-3.5 w-3.5 text-[#2E6B4F]" /> : <Copy className="h-3.5 w-3.5" />}
-                  {copiedUrl ? "Copied" : "Copy URL"}
-                </Button>
-                <a
-                  href={liveUrl}
-                  target="_blank"
-                  rel="noreferrer"
-                  className="inline-flex items-center gap-2 rounded-lg border border-[#24543D] bg-[#2E6B4F] px-3.5 py-2 text-sm font-bold text-white shadow-sm transition hover:bg-[#24543D]"
-                >
-                  Open App <ExternalLink className="h-4 w-4" />
-                </a>
-              </>
-            )}
-          </div>
-        </div>
-      )}
-
-      {/* Clean-Slate Post-Destroy Card (When Destroyed) */}
-      {isDestroyed && (
-        <div className="p-6 rounded-3xl bg-gradient-to-r from-[#FAF8F5] via-white to-[#FAF8F5] border-2 border-[#DCD0C3] shadow-sm flex flex-col md:flex-row items-center justify-between gap-5">
-          <div className="flex items-start gap-4">
-            <div className="p-3.5 rounded-2xl bg-[#362217] text-white shadow-sm shrink-0">
-              <Trash2 className="h-7 w-7 text-[#D97706]" />
-            </div>
-            <div className="flex flex-col gap-1">
-              <div className="flex items-center gap-2">
-                <span className="text-xs font-bold text-[#362217] uppercase tracking-wider">
-                  Cloud Infrastructure Status
-                </span>
-                <span className="text-[10px] px-2 py-0.5 rounded-md font-bold bg-[#362217] text-[#FAF8F5]">
-                  0 Active AWS Resources
-                </span>
-              </div>
-              <h3 className="text-lg font-bold text-[#362217]">
-                All AWS Cloud Infrastructure Destroyed
-              </h3>
-              <p className="text-xs text-[#5E4C3E] max-w-xl">
-                Recorded ECS, ECR, ALB load balancer, security group, IAM, secret, and log resources were verified absent. Unrelated resources in the connected account are left untouched.
+        <section className="flex flex-col gap-4 rounded-3xl border-2 border-[#2E6B4F]/30 bg-[#2E6B4F]/5 p-5 sm:flex-row sm:items-center sm:justify-between">
+          <div className="flex min-w-0 items-start gap-4">
+            <span className="flex h-12 w-12 shrink-0 items-center justify-center rounded-2xl bg-[#2E6B4F] text-white"><Globe className="h-6 w-6" /></span>
+            <div className="min-w-0">
+              <p className="flex items-center gap-2 text-[10px] font-bold uppercase tracking-wider text-[#2E6B4F]">
+                Your site is live
+                <span className={`rounded-md px-1.5 py-0.5 text-[10px] text-white ${healthStatus === "HEALTHY" ? "bg-[#2E6B4F]" : "bg-[#D97706]"}`}>{healthStatus === "HEALTHY" ? "Healthy" : `Health: ${healthStatus.toLowerCase()}`}</span>
               </p>
+              <a href={customDomain || liveUrl || undefined} target="_blank" rel="noreferrer" className="block truncate font-mono text-base font-bold text-[#362217] hover:text-[#9E5D2D]">{(customDomain || liveUrl || "Address unavailable").replace(/^https?:\/\//, "")}</a>
+              <p className="mt-0.5 text-xs text-[#5E4C3E]">Responds in {latency}{customDomain && liveUrl ? ` · also at ${liveUrl.replace(/^https?:\/\//, "")}` : ""}</p>
             </div>
           </div>
-
-          <div className="flex items-center gap-2.5 shrink-0">
-            <Button
-              onClick={handleTriggerDeploy}
-              loading={deploying}
-              className="bg-[#9E5D2D] hover:bg-[#844C22] text-white flex items-center gap-2 shadow-sm font-bold"
-            >
-              <Rocket className="h-4 w-4" />
-              <span>Deploy Clean Architecture</span>
-            </Button>
+          <div className="flex shrink-0 flex-wrap gap-2">
+            {(customDomain || liveUrl) && (
+              <button type="button" onClick={() => handleCopyUrl(customDomain || liveUrl)} className={buttonClass.secondary}>{copiedUrl ? <Check className="h-3.5 w-3.5 text-[#2E6B4F]" /> : <Copy className="h-3.5 w-3.5" />} {copiedUrl ? "Copied" : "Copy"}</button>
+            )}
+            <Link to={`/project/${id}/monitor`} className={buttonClass.secondary}><Activity className="h-3.5 w-3.5" /> Logs & metrics</Link>
+            {(customDomain || liveUrl) && <a href={customDomain || liveUrl} target="_blank" rel="noreferrer" className="inline-flex items-center gap-1.5 rounded-xl bg-[#2E6B4F] px-4 py-2 text-xs font-semibold text-white shadow-sm transition hover:bg-[#24543D]">Open site <ExternalLink className="h-3.5 w-3.5" /></a>}
           </div>
-        </div>
+        </section>
       )}
 
-      {/* Continuous Health & Monitoring Card */}
-      {hasLiveEndpoint && (
-        <Card glow={false} className="bg-white border border-[#EAE1D5] flex flex-col gap-4">
-          <div className="flex items-center justify-between border-b border-[#EADFCF] pb-3">
-            <div className="flex items-center gap-2.5">
-              <div className="p-2 rounded-xl bg-[#2E6B4F]/10 text-[#2E6B4F]">
-                <HeartPulse className="h-5 w-5 animate-pulse" />
-              </div>
-              <div>
-                <h3 className="text-base font-bold text-[#362217]">Automated Monitoring Worker</h3>
-                <p className="text-xs text-[#5E4C3E]">
-                  Periodic edge probes verify ALB target health, container uptime, and round-trip response metrics.
-                </p>
-              </div>
-            </div>
-            <span className={`text-xs font-mono font-bold flex items-center gap-1.5 ${healthStatus === "HEALTHY" ? "text-[#2E6B4F]" : "text-[#D97706]"}`}>
-              <span className={`h-2 w-2 rounded-full ${healthStatus === "HEALTHY" ? "bg-[#2E6B4F] animate-ping" : "bg-[#D97706]"}`} />
-              {healthStatus === "HEALTHY" ? "Health probe verified" : "Health probe pending"}
-            </span>
-          </div>
-
-          <div className="grid grid-cols-2 sm:grid-cols-4 gap-3 text-xs">
-            <div className="p-3 rounded-2xl bg-[#FAF8F5] border border-[#EAE1D5] flex flex-col gap-1">
-              <span className="text-[10px] font-bold text-[#8C7667] uppercase tracking-wider">Health Status</span>
-              <span className={`text-sm font-bold flex items-center gap-1 ${healthStatus === "HEALTHY" ? "text-[#2E6B4F]" : "text-[#D97706]"}`}>
-                {healthStatus === "HEALTHY" ? <CheckCircle2 className="h-4 w-4" /> : <AlertCircle className="h-4 w-4" />} {healthStatus}
-              </span>
-            </div>
-            <div className="p-3 rounded-2xl bg-[#FAF8F5] border border-[#EAE1D5] flex flex-col gap-1">
-              <span className="text-[10px] font-bold text-[#8C7667] uppercase tracking-wider">Round-Trip Latency</span>
-              <span className="text-sm font-bold text-[#362217] font-mono">{latency}</span>
-            </div>
-            <div className="p-3 rounded-2xl bg-[#FAF8F5] border border-[#EAE1D5] flex flex-col gap-1">
-              <span className="text-[10px] font-bold text-[#8C7667] uppercase tracking-wider">Compute State</span>
-              <span className="text-sm font-bold text-[#362217]">{activeDeployment?.target || project?.deploymentTarget || "AWS"}</span>
-            </div>
-            <div className="p-3 rounded-2xl bg-[#FAF8F5] border border-[#EAE1D5] flex flex-col gap-1">
-              <span className="text-[10px] font-bold text-[#8C7667] uppercase tracking-wider">Uptime Rate</span>
-              <span className="text-sm font-bold text-[#5E4C3E]">Not measured</span>
+      {/* After teardown */}
+      {isDestroyed && (
+        <section className="flex flex-col gap-4 rounded-3xl border border-[#DCD0C3] bg-gradient-to-r from-[#FAF8F5] to-[#F3ECE3] p-5 sm:flex-row sm:items-center sm:justify-between">
+          <div className="flex items-start gap-4">
+            <span className="flex h-12 w-12 shrink-0 items-center justify-center rounded-2xl bg-[#362217] text-[#E0A36E]"><Trash2 className="h-6 w-6" /></span>
+            <div>
+              <p className="text-base font-bold text-[#362217]">Everything was removed from AWS</p>
+              <p className="max-w-xl text-xs text-[#5E4C3E]">The container, load balancer, image registry, security groups, roles, secrets and logs this project created were deleted and verified gone, so it costs nothing now. Other resources in your account were left alone.</p>
             </div>
           </div>
-        </Card>
+          <button type="button" onClick={handleTriggerDeploy} disabled={deploying} className={buttonClass.primary}>{deploying ? <Loader2 className="h-3.5 w-3.5 animate-spin" /> : <Rocket className="h-3.5 w-3.5" />} Deploy again</button>
+        </section>
       )}
 
-      {/* Live Terminal Console */}
-      <Card glow={false} className="flex flex-col gap-0 p-0 overflow-hidden bg-[#1E1E1E] border border-[#362217] shadow-lg">
-        {/* Terminal Header */}
-        <div className="flex items-center justify-between bg-[#2A2A2A] border-b border-[#3D3D3D] px-4 py-2.5">
-          <div className="flex items-center gap-3">
-            {/* macOS Window Controls */}
-            <div className="flex items-center gap-1.5">
-              <div className="h-3 w-3 rounded-full bg-[#FF5F56]" />
-              <div className="h-3 w-3 rounded-full bg-[#FFBD2E]" />
-              <div className="h-3 w-3 rounded-full bg-[#27C93F]" />
-            </div>
-            <div className="flex items-center gap-2 text-xs font-mono text-[#D4D4D4]">
-              <Terminal className="h-3.5 w-3.5 text-[#9E5D2D]" />
-              <span>SkyForge Real-Time Deployment Pipeline</span>
-            </div>
+      {/* Terminal */}
+      <section className="overflow-hidden rounded-3xl border border-[#2A211C] bg-[#1A1411] shadow-lg keep-colors">
+        <div className="flex flex-col gap-3 border-b border-[#2E2520] bg-[#221A16] px-4 py-3 lg:flex-row lg:items-center lg:justify-between">
+          <div className="flex items-center gap-2 text-xs font-semibold text-[#E5DED6]">
+            <Terminal className="h-4 w-4 text-[#E0A36E]" />
+            Deployment log
+            <span className="rounded-full bg-white/10 px-2 py-0.5 text-[10px] text-[#BFAEA0]">{visibleLogs.length}{visibleLogs.length !== logs.length ? ` of ${logs.length}` : ""} lines</span>
+            {errorCount > 0 && <button type="button" onClick={() => setLogLevel("error")} className="rounded-full bg-[#C2412D]/25 px-2 py-0.5 text-[10px] font-bold text-[#FCA5A5]">{errorCount} error{errorCount === 1 ? "" : "s"}</button>}
+            {(isBuilding || isQueued || isDestroying) && <span className="inline-flex items-center gap-1 text-[10px] text-[#4EBA87]"><span className="h-1.5 w-1.5 animate-pulse rounded-full bg-[#4EBA87]" /> streaming</span>}
           </div>
-
-          <div className="flex items-center gap-3">
-            <span className="text-[11px] font-mono text-[#8C7667] uppercase">
-              {deploying ? "STREAMING TELEMETRY" : "TERMINAL IDLE"}
-            </span>
-            <Button
-              variant="outline"
-              size="sm"
-              onClick={handleCopyAllLogs}
-              className="text-xs bg-transparent border-[#4D4D4D] text-[#D4D4D4] hover:bg-[#3D3D3D] py-1 px-2.5 h-auto"
-            >
-              {copiedLogs ? <Check className="h-3 w-3 text-[#2E6B4F]" /> : <Copy className="h-3 w-3" />}
-              <span>{copiedLogs ? "Copied" : "Copy"}</span>
-            </Button>
+          <div className="flex flex-wrap items-center gap-2">
+            <div className="flex h-8 items-center gap-1.5 rounded-lg border border-[#3A2E26] bg-[#15100D] px-2">
+              <Search className="h-3.5 w-3.5 text-[#8C7F73]" />
+              <input value={logSearch} onChange={(event) => setLogSearch(event.target.value)} placeholder="Search log" className="w-36 bg-transparent text-[11px] text-[#E5DED6] outline-none placeholder:text-[#6F6259]" />
+              {logSearch && <button type="button" onClick={() => setLogSearch("")} aria-label="Clear search"><X className="h-3 w-3 text-[#8C7F73]" /></button>}
+            </div>
+            <div className="flex rounded-lg border border-[#3A2E26] p-0.5">
+              {[["all", "All"], ["warn", "Warnings"], ["error", "Errors"]].map(([value, label]) => (
+                <button key={value} type="button" onClick={() => setLogLevel(value)} className={`rounded-md px-2 py-1 text-[10px] font-semibold transition ${logLevel === value ? "bg-[#E0A36E] text-[#1A1411]" : "text-[#BFAEA0] hover:bg-white/5"}`}>{label}</button>
+              ))}
+            </div>
+            <button type="button" onClick={handleCopyAllLogs} className="inline-flex h-8 items-center gap-1 rounded-lg border border-[#3A2E26] px-2 text-[10px] font-semibold text-[#BFAEA0] hover:bg-white/5">{copiedLogs ? <Check className="h-3 w-3 text-[#4EBA87]" /> : <Copy className="h-3 w-3" />} {copiedLogs ? "Copied" : "Copy"}</button>
+            <button type="button" onClick={downloadLogs} disabled={!logs.length} className="inline-flex h-8 items-center gap-1 rounded-lg border border-[#3A2E26] px-2 text-[10px] font-semibold text-[#BFAEA0] hover:bg-white/5 disabled:opacity-40"><Download className="h-3 w-3" /> Download</button>
           </div>
         </div>
-
-        {/* Terminal Body */}
-        <div className="p-5 font-mono text-xs overflow-y-auto max-h-[500px] flex flex-col gap-1.5 leading-relaxed text-[#D4D4D4]">
-          {logs.length === 0 ? (
-            <div className="text-[#8C7667] italic py-8 text-center">
-              Awaiting deployment trigger. Click 'Deploy to AWS Now' above to initialize worker and stream logs...
-            </div>
-          ) : (
-            logs.map((log) => {
-              const isError = log.level === "error" || log.stage === "FAILED";
-              const isSuccess = log.level === "success" || log.stage === "LIVE";
-              const isWarn = log.level === "warn" || log.stage === "ROLLBACK";
-              const isDestroy = log.stage === "DESTROY";
-
+        <div className="relative">
+          <div
+            ref={terminalRef}
+            onScroll={(event) => {
+              const box = event.currentTarget;
+              setFollowLogs(box.scrollHeight - box.scrollTop - box.clientHeight < 40);
+            }}
+            className="flex max-h-[520px] min-h-[220px] flex-col gap-1 overflow-y-auto p-4 font-mono text-[11.5px] leading-relaxed text-[#E5DED6]"
+          >
+            {logs.length === 0 ? (
+              <p className="py-10 text-center italic text-[#8C7F73]">No log yet. Press Deploy and every step appears here as it happens.</p>
+            ) : visibleLogs.length === 0 ? (
+              <p className="py-10 text-center italic text-[#8C7F73]">No lines match. <button type="button" onClick={() => { setLogSearch(""); setLogLevel("all"); }} className="font-semibold text-[#E0A36E] underline">Show everything</button></p>
+            ) : visibleLogs.map((log) => {
+              const level = levelOf(log);
+              const isDestroy = /^DESTROY/.test(log.stage || "") && level === "info";
+              const tone = isDestroy ? "text-[#C7D2FE]" : level === "error" ? "text-[#FF8787] font-semibold" : level === "success" ? "text-[#4EBA87] font-semibold" : level === "warn" ? "text-[#FCD34D]" : "text-[#E6E6E6]";
+              const badge = isDestroy ? "bg-[#6366F1]/20 text-[#C7D2FE]" : level === "error" ? "bg-[#9E2A2B]/35 text-[#FF6B6B]" : level === "success" ? "bg-[#2E6B4F]/35 text-[#4EBA87]" : level === "warn" ? "bg-[#D97706]/30 text-[#F59E0B]" : "bg-white/10 text-[#E8C39E]";
               return (
-                <div key={log.id} className="flex items-start gap-2 hover:bg-white/5 py-0.5 px-1 rounded transition-colors">
-                  <span className="text-[#8C7667] shrink-0 select-none">
-                    {new Date(log.timestamp).toLocaleTimeString()}
-                  </span>
-                  <span
-                    className={`font-bold shrink-0 uppercase text-[10px] px-1.5 py-0.2 rounded font-mono ${
-                      isDestroy
-                        ? "bg-[#9E2A2B]/40 text-[#FFA8A8] border border-[#9E2A2B]/60"
-                        : isError
-                        ? "bg-[#9E2A2B]/30 text-[#FF6B6B]"
-                        : isSuccess
-                        ? "bg-[#2E6B4F]/30 text-[#4EBA87]"
-                        : isWarn
-                        ? "bg-[#D97706]/30 text-[#F59E0B]"
-                        : "bg-white/10 text-[#E8C39E]"
-                    }`}
-                  >
-                    [{log.stage}]
-                  </span>
-                  <span
-                    className={`whitespace-pre-wrap break-all ${
-                      isDestroy
-                        ? "text-[#FFA8A8] font-medium"
-                        : isError
-                        ? "text-[#FF8787] font-semibold"
-                        : isSuccess
-                        ? "text-[#4EBA87] font-semibold"
-                        : isWarn
-                        ? "text-[#FCD34D]"
-                        : "text-[#E6E6E6]"
-                    }`}
-                  >
-                    {log.message}
-                  </span>
+                <div key={log.id} className={`flex items-start gap-2 rounded px-1 py-0.5 transition-colors hover:bg-white/5 ${level === "error" ? "bg-[#9E2A2B]/10" : ""}`}>
+                  <span className="shrink-0 select-none text-[#7D6F64]">{new Date(log.timestamp).toLocaleTimeString()}</span>
+                  <span className={`shrink-0 rounded px-1.5 font-mono text-[10px] font-bold uppercase ${badge}`}>{stageInfo(log.stage).label || log.stage}</span>
+                  <span className={`whitespace-pre-wrap break-all ${tone}`}>{highlight(log.message)}</span>
                 </div>
               );
-            })
+            })}
+          </div>
+          {!followLogs && logs.length > 0 && (
+            <button
+              type="button"
+              onClick={() => {
+                setFollowLogs(true);
+                if (terminalRef.current) terminalRef.current.scrollTop = terminalRef.current.scrollHeight;
+              }}
+              className="absolute bottom-4 right-4 inline-flex items-center gap-1 rounded-full bg-[#E0A36E] px-3 py-1.5 text-[11px] font-bold text-[#1A1411] shadow-lg"
+            >
+              <ArrowDownToLine className="h-3.5 w-3.5" /> Jump to latest
+            </button>
           )}
-          <div ref={logsEndRef} />
         </div>
-      </Card>
+      </section>
+
+      {/* Earlier versions */}
+      {versions.length > 1 && (
+        <section className="rounded-3xl border border-[#EAE1D5] bg-white p-5 sm:p-6">
+          <div className="mb-4 flex flex-col gap-1 sm:flex-row sm:items-end sm:justify-between">
+            <div>
+              <h3 className="flex items-center gap-2 text-base font-bold text-[#362217]"><History className="h-[18px] w-[18px] text-[#9E5D2D]" /> Versions</h3>
+              <p className="text-xs text-[#5E4C3E]">Put any earlier working version back live in about a minute, without rebuilding. {restorable.length ? "" : "Versions become restorable once there are at least two successful deploys on the same infrastructure."}</p>
+            </div>
+            <Link to="/dashboard/deployments" className="text-xs font-semibold text-[#9E5D2D] hover:underline">Full history →</Link>
+          </div>
+          <ul className="divide-y divide-[#F0E7DC]">
+            {versions.slice(0, 8).map((version) => (
+              <li key={version.id} className="flex flex-col gap-2 py-3 sm:flex-row sm:items-center sm:justify-between">
+                <div className="min-w-0">
+                  <div className="flex flex-wrap items-center gap-2">
+                    <span className="text-xs font-semibold text-[#362217]">{new Date(version.createdAt).toLocaleString()}</span>
+                    {version.isCurrent && <span className="rounded-full bg-[#2E6B4F] px-2 py-0.5 text-[10px] font-bold text-white">Serving now</span>}
+                    <span className="text-[11px] text-[#8C7667]">{STATUS_LABELS[version.status] || version.status.toLowerCase().replaceAll("_", " ")}</span>
+                  </div>
+                  <p className="truncate text-[11px] text-[#5E4C3E]">
+                    {version.commitSha ? <><span className="font-mono">{version.commitSha.slice(0, 7)}</span> {version.commitMessage?.split("\n")[0]}</> : "Commit not recorded"}
+                  </p>
+                </div>
+                <div className="flex shrink-0 gap-2">
+                  {version.restorable && (
+                    <button type="button" disabled={Boolean(restoringId) || isActiveOperation} onClick={() => handleRestore(version)} className={buttonClass.secondary}>
+                      {restoringId === version.id ? <Loader2 className="h-3.5 w-3.5 animate-spin" /> : <Undo2 className="h-3.5 w-3.5" />} Restore
+                    </button>
+                  )}
+                  {version.id !== activeDeployment?.id && <button type="button" onClick={() => openDeployment(version.id)} className={buttonClass.secondary}>View log</button>}
+                </div>
+              </li>
+            ))}
+          </ul>
+          {current && hasLiveEndpoint && <p className="mt-2 text-[11px] text-[#8C7667]">Restoring keeps the same address; the switch happens only after the old version passes health checks.</p>}
+        </section>
+      )}
+
+      {/* AWS account */}
+      <div className="flex flex-col gap-3 rounded-2xl border border-[#EAE1D5] bg-[#FAF8F5] p-4 text-xs sm:flex-row sm:items-center sm:justify-between">
+        <div className="flex items-center gap-3">
+          <ShieldCheck className="h-5 w-5 text-[#2E6B4F]" />
+          <span className="font-mono text-[#5E4C3E]">
+            {awsConnected ? `AWS account ${awsData?.accountId || "connected"} · ${awsData?.region || "region not set"}${awsData?.maskedAccessKey ? ` · key ${awsData.maskedAccessKey}` : ""}` : "No AWS account connected: connect one to deploy"}
+          </span>
+        </div>
+        <div className="flex items-center gap-3">
+          <button type="button" onClick={() => { setAwsRegionInput(awsData?.region || "ap-south-1"); setShowAwsModal(true); }} className="inline-flex items-center gap-1.5 font-semibold text-[#9E5D2D] hover:underline"><Key className="h-3.5 w-3.5" /> {awsConnected ? "Update AWS keys" : "Connect AWS"}</button>
+          {hasLiveEndpoint && <button type="button" onClick={() => setShowRollbackModal(true)} disabled={rollingBack || destroying} className="inline-flex items-center gap-1.5 font-semibold text-[#6D28D9] hover:underline disabled:opacity-50"><Undo2 className="h-3.5 w-3.5" /> Roll back to previous</button>}
+        </div>
+      </div>
 
       {/* Rollback Confirmation Modal */}
       {showRollbackModal && (

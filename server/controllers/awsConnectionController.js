@@ -240,3 +240,14 @@ export const saveAwsCredentials = async (req, res) => {
     return res.status(error.statusCode || 400).json({ message: userMessage });
   }
 };
+
+/** GET /aws/readiness: read-only checks that the connected AWS account (and this machine) can deploy. */
+export const getAwsReadiness = async (req, res) => {
+  try {
+    const { runAwsReadiness } = await import("../services/awsReadiness.js");
+    return res.json(await runAwsReadiness(req.user.id));
+  } catch (error) {
+    console.error("[AWS] Readiness check failed:", error.message);
+    return res.status(500).json({ message: "The AWS readiness check could not run." });
+  }
+};

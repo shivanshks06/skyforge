@@ -39,7 +39,7 @@ export default function Landing() {
   ];
 
   return (
-    <div className="relative min-h-screen bg-[#FAF8F5] text-[#362217] selection:bg-[#9E5D2D]/20 selection:text-[#362217]">
+    <div className="app-bg relative min-h-screen bg-[#FAF8F5] text-[#362217] selection:bg-[#9E5D2D]/20 selection:text-[#362217]">
       {/* Soft Ambient Background Lights (matching screenshot glows) */}
       <div className="ambient-glow-teal top-0 right-1/4" />
       <div className="ambient-glow-bronze top-10 right-0" />

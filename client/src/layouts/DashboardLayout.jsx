@@ -1,19 +1,24 @@
 import { Outlet, Link, useLocation, useNavigate } from "react-router-dom";
-import { useContext, useState } from "react";
+import { useContext, useEffect, useState } from "react";
 import { AuthContext } from "../context/authContext.js";
-import { getGithubLoginUrl } from "../services/api";
+import { getAwsStatus, getGithubLoginUrl } from "../services/api";
 import Logo from "../components/Logo";
+import GlobalSearch from "../components/GlobalSearch";
+import NotificationCenter from "../components/NotificationCenter";
+import ThemeToggle from "../components/ThemeToggle";
+import OnboardingTour from "../components/OnboardingTour";
 import {
   LayoutDashboard,
   FolderGit2,
   Rocket,
   Settings,
   LogOut,
-  Search,
+  BookOpen,
   ShieldCheck,
   GitPullRequest,
   CheckCircle2,
   Menu,
+  Wallet,
   X
 } from "lucide-react";
 
@@ -22,12 +27,23 @@ export default function DashboardLayout() {
   const location = useLocation();
   const navigate = useNavigate();
   const [mobileMenuOpen, setMobileMenuOpen] = useState(false);
-  const [globalSearch, setGlobalSearch] = useState("");
+  const [aws, setAws] = useState(null);
+
+  // The header badge shows the real AWS connection, refreshed on each page change.
+  useEffect(() => {
+    let cancelled = false;
+    getAwsStatus().then((status) => !cancelled && setAws(status)).catch(() => !cancelled && setAws({ connected: false }));
+    return () => {
+      cancelled = true;
+    };
+  }, [location.pathname]);
 
   const navItems = [
     { label: "Overview", path: "/dashboard", icon: LayoutDashboard },
     { label: "Projects", path: "/dashboard/projects", icon: FolderGit2 },
     { label: "Deployments", path: "/dashboard/deployments", icon: Rocket },
+    { label: "Costs", path: "/dashboard/costs", icon: Wallet },
+    { label: "AWS Guide", path: "/dashboard/aws-guide", icon: BookOpen },
     { label: "Settings", path: "/dashboard/settings", icon: Settings },
   ];
 
@@ -49,6 +65,12 @@ export default function DashboardLayout() {
     if (path === "/dashboard/deployments") return "Deployments";
     if (path === "/dashboard/projects") return "Projects";
     if (path === "/dashboard/settings") return "Settings";
+    if (path === "/dashboard/aws-guide") return "AWS Guide";
+    if (path === "/dashboard/new") return "Deploy a new site";
+    if (path === "/dashboard/costs") return "Costs";
+    if (path.includes("/monitor")) return "Monitoring";
+    if (path.includes("/settings") && path.startsWith("/project/")) return "Site settings";
+    if (path.includes("/security")) return "Security";
     if (path.includes("/deploy")) return "Deployment Console";
     if (path.includes("/plan")) return "AI Deployment Plan";
     if (path.includes("/docker")) return "Dockerfile Preview";
@@ -56,14 +78,8 @@ export default function DashboardLayout() {
     return "Overview";
   };
 
-  const handleGlobalSearch = (event) => {
-    event.preventDefault();
-    const query = globalSearch.trim();
-    navigate(query ? `/dashboard/projects?search=${encodeURIComponent(query)}` : "/dashboard/projects");
-  };
-
   return (
-    <div className="flex h-screen bg-[#FAF8F5] text-[#362217] selection:bg-[#9E5D2D]/20 overflow-hidden">
+    <div className="app-bg flex h-screen bg-[#FAF8F5] text-[#362217] selection:bg-[#9E5D2D]/20 overflow-hidden">
       {/* Mobile Backdrop */}
       {mobileMenuOpen && (
         <div
@@ -80,7 +96,7 @@ export default function DashboardLayout() {
       >
         <div>
           <div className="p-6 border-b border-[#4D3325] flex items-center justify-between">
-            <Logo />
+            <Logo tone="light" />
             <button
               onClick={() => setMobileMenuOpen(false)}
               className="p-1.5 rounded-lg text-[#BFAEA0] hover:text-white md:hidden"
@@ -90,6 +106,14 @@ export default function DashboardLayout() {
           </div>
 
           <nav className="p-4 flex flex-col gap-1.5">
+            <Link
+              to="/dashboard/new"
+              data-tour="deploy"
+              onClick={() => setMobileMenuOpen(false)}
+              className="keep-colors mb-2 flex items-center justify-center gap-2 rounded-xl bg-[#E0A36E] px-4 py-2.5 text-sm font-bold text-[#2C1B12] shadow-sm transition hover:bg-[#EBB585]"
+            >
+              <Rocket className="h-4 w-4" /> Deploy a new site
+            </Link>
             {navItems.map((item) => {
               const isActive =
                 item.path === "/dashboard"
@@ -101,6 +125,7 @@ export default function DashboardLayout() {
                 <Link
                   key={item.path}
                   to={item.path}
+                  data-tour={`nav-${item.label.toLowerCase().replace(/\s+/g, "-")}`}
                   onClick={() => setMobileMenuOpen(false)}
                   className={`flex items-center gap-3 rounded-xl px-4 py-3 text-sm font-medium transition-all duration-200 ${
                     isActive
@@ -141,7 +166,9 @@ export default function DashboardLayout() {
       {/* Main Content Area */}
       <div className="flex-1 flex flex-col min-w-0 overflow-hidden">
         {/* Top Header */}
-        <header className="h-20 border-b border-[#EADFCF] bg-[#FAF8F5]/90 backdrop-blur-xl flex items-center justify-between px-6 sm:px-8">
+        {/* relative + z-40: the header's backdrop blur creates its own stacking context, so without
+            a z-index the page content below would paint over the search results dropdown. */}
+        <header className="app-header relative z-40 h-20 border-b border-[#EADFCF] bg-[#FAF8F5]/90 backdrop-blur-xl flex items-center justify-between px-6 sm:px-8">
           <div className="flex items-center gap-3">
             <button
               onClick={() => setMobileMenuOpen(true)}
@@ -151,20 +178,28 @@ export default function DashboardLayout() {
             </button>
             <h1 className="text-lg font-bold text-[#362217]">{getPageTitle()}</h1>
 
-            {/* AWS Status Badge */}
-            <div className="hidden sm:flex items-center gap-1.5 rounded-full border border-[#2E6B4F]/30 bg-[#2E6B4F]/10 px-3 py-1 text-xs text-[#2E6B4F] font-semibold">
-              <ShieldCheck className="h-3.5 w-3.5" />
-              <span>AWS • Configure in Settings</span>
-            </div>
+            {/* AWS connection badge */}
+            {aws && (aws.connected ? (
+              <Link to="/dashboard/settings" data-tour="aws" title="AWS connection settings" className="hidden sm:flex items-center gap-1.5 rounded-full border border-[#2E6B4F]/30 bg-[#2E6B4F]/10 px-3 py-1 text-xs text-[#2E6B4F] font-semibold transition hover:bg-[#2E6B4F]/15">
+                <ShieldCheck className="h-3.5 w-3.5" />
+                <span>AWS{aws.accountId ? ` • …${String(aws.accountId).slice(-4)}` : ""}{aws.region ? ` • ${aws.region}` : ""}</span>
+              </Link>
+            ) : (
+              <Link to="/dashboard/settings" data-tour="aws" className="hidden sm:flex items-center gap-1.5 rounded-full border border-amber-500/40 bg-amber-500/10 px-3 py-1 text-xs text-amber-700 font-semibold transition hover:bg-amber-500/20">
+                <ShieldCheck className="h-3.5 w-3.5" />
+                <span>Connect AWS</span>
+              </Link>
+            ))}
 
             {/* GitHub Connection Sync Status */}
             {isGithubConnected ? (
-              <div className="hidden lg:flex items-center gap-1.5 rounded-full border border-[#2E6B4F]/30 bg-[#2E6B4F]/10 px-3 py-1 text-xs text-[#2E6B4F] font-semibold">
+              <div data-tour="github" className="hidden lg:flex items-center gap-1.5 rounded-full border border-[#2E6B4F]/30 bg-[#2E6B4F]/10 px-3 py-1 text-xs text-[#2E6B4F] font-semibold">
                 <CheckCircle2 className="h-3.5 w-3.5" />
                 <span>GitHub • @{githubAccount?.username || user?.github?.username || "connected"}</span>
               </div>
             ) : (
               <button
+                data-tour="github"
                 onClick={handleConnectGitHub}
                 className="hidden lg:flex items-center gap-1.5 rounded-full border border-[#9E5D2D]/30 bg-[#9E5D2D]/10 hover:bg-[#9E5D2D]/20 px-3 py-1 text-xs text-[#9E5D2D] font-semibold transition"
               >
@@ -175,18 +210,12 @@ export default function DashboardLayout() {
           </div>
 
           {/* Search & Actions */}
-          <div className="flex items-center gap-4">
-            <form onSubmit={handleGlobalSearch} className="relative hidden md:flex items-center" role="search">
-              <Search className="absolute left-3 h-4 w-4 text-[#8C7667]" />
-              <input
-                type="search"
-                value={globalSearch}
-                onChange={(event) => setGlobalSearch(event.target.value)}
-                placeholder="Search projects..."
-                aria-label="Search projects"
-                className="w-64 rounded-xl border border-[#DCD0C3] bg-white pl-9 pr-4 py-2 text-xs text-[#362217] placeholder-[#A39284] outline-none focus:border-[#9E5D2D] focus:ring-1 focus:ring-[#9E5D2D]"
-              />
-            </form>
+          <div className="flex items-center gap-2 sm:gap-3">
+            <div className="hidden md:block" data-tour="search"><GlobalSearch /></div>
+            <div className="md:hidden" data-tour="search"><GlobalSearch compact /></div>
+
+            <ThemeToggle />
+            <div data-tour="notifications"><NotificationCenter /></div>
 
             <Link
               to="/dashboard/settings"
@@ -198,9 +227,14 @@ export default function DashboardLayout() {
           </div>
         </header>
 
+        <OnboardingTour />
+
         {/* Dynamic Body */}
         <main className="flex-1 overflow-auto p-6 sm:p-8">
-          <Outlet />
+          {/* Keyed by path so each page fades in when you navigate. */}
+          <div key={location.pathname} className="page-enter">
+            <Outlet />
+          </div>
         </main>
       </div>
     </div>

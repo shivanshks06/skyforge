@@ -102,7 +102,7 @@
 
 @keyframes skyforge-slide-in {
   from { opacity: 0; transform: translateY(-1rem); }
-  to { opacity: 1; transform: translateY(0); }
+  to { opacity: 1; transform: none; } /* none, so fixed-position toasts inside pages stay put */
 }
 
 @keyframes skyforge-zoom-in {
@@ -115,6 +115,69 @@
 .slide-in-from-top-4 { animation: skyforge-slide-in 220ms ease-out both; }
 .zoom-in-95 { animation: skyforge-zoom-in 180ms ease-out both; }
 .scrollbar-thin { scrollbar-width: thin; }
+
+/* Page transitions and gentle motion (disabled by the reduced-motion rule below). */
+@keyframes skyforge-page-enter {
+  from { opacity: 0; transform: translateY(6px); }
+  to { opacity: 1; transform: none; } /* none, so fixed-position toasts inside pages stay put */
+}
+.page-enter { animation: skyforge-page-enter 260ms cubic-bezier(0.22, 1, 0.36, 1) both; }
+
+/* Notification toast: slides in with a small overshoot, glows in its colour, and counts down. */
+@keyframes skyforge-toast-in {
+  0% { opacity: 0; transform: translateX(120%) scale(0.92); }
+  60% { opacity: 1; transform: translateX(-10px) scale(1.02); }
+  100% { opacity: 1; transform: translateX(0) scale(1); }
+}
+@keyframes skyforge-toast-glow {
+  0%, 100% { box-shadow: 0 18px 50px -12px var(--toast-color), 0 0 0 4px color-mix(in oklab, var(--toast-color) 18%, transparent); }
+  50% { box-shadow: 0 18px 50px -8px var(--toast-color), 0 0 0 8px color-mix(in oklab, var(--toast-color) 10%, transparent); }
+}
+@keyframes skyforge-toast-progress {
+  from { transform: scaleX(1); }
+  to { transform: scaleX(0); }
+}
+@keyframes skyforge-ping {
+  0% { transform: scale(1); opacity: 0.55; }
+  100% { transform: scale(2.1); opacity: 0; }
+}
+@keyframes skyforge-bell {
+  0%, 100% { transform: rotate(0); }
+  15% { transform: rotate(16deg); }
+  30% { transform: rotate(-14deg); }
+  45% { transform: rotate(10deg); }
+  60% { transform: rotate(-6deg); }
+  75% { transform: rotate(3deg); }
+}
+/* A light sweep across the deploy progress bar while work is happening. */
+@keyframes skyforge-sheen {
+  from { transform: translateX(-100%); }
+  to { transform: translateX(100%); }
+}
+.progress-sheen { background: linear-gradient(90deg, transparent, rgba(255, 255, 255, 0.55), transparent); animation: skyforge-sheen 1.6s ease-in-out infinite; }
+.toast-pop { animation: skyforge-toast-in 520ms cubic-bezier(0.22, 1, 0.36, 1) both, skyforge-toast-glow 2.4s ease-in-out 520ms infinite; }
+.toast-progress { transform-origin: left; animation: skyforge-toast-progress 9s linear forwards; }
+.toast-pop:hover .toast-progress { animation-play-state: paused; }
+.toast-ping { animation: skyforge-ping 1.4s cubic-bezier(0, 0, 0.2, 1) infinite; }
+.bell-ring { animation: skyforge-bell 900ms ease-in-out 2; transform-origin: top center; }
+@media (prefers-reduced-motion: reduce) {
+  .toast-pop, .toast-ping, .bell-ring, .progress-sheen { animation: none; }
+  .toast-progress { animation-duration: 9s; }
+}
+.lift { transition: transform 200ms ease, box-shadow 200ms ease, border-color 200ms ease; }
+.lift:hover { transform: translateY(-2px); box-shadow: 0 12px 28px -12px rgba(54, 34, 23, 0.22); border-color: #DCC7B2; }
+@keyframes skyforge-shimmer {
+  from { background-position: -400px 0; }
+  to { background-position: 400px 0; }
+}
+.skeleton {
+  border-radius: 0.75rem;
+  background: linear-gradient(90deg, #F3ECE3 0px, #FBF7F2 160px, #F3ECE3 320px);
+  background-size: 800px 100%;
+  animation: skyforge-shimmer 1.4s linear infinite;
+}
+html { scroll-behavior: smooth; }
+:focus-visible { outline: 2px solid #9E5D2D; outline-offset: 2px; }
 
 @media (prefers-reduced-motion: reduce) {
   *, *::before, *::after {

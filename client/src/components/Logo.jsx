@@ -1,7 +1,8 @@
 import { Cpu } from "lucide-react";
 import { Link } from "react-router-dom";
 
-export default function Logo({ className = "", showIcon = true }) {
+/** tone="light" is for dark backgrounds such as the dashboard sidebar. */
+export default function Logo({ className = "", showIcon = true, tone = "dark" }) {
   return (
     <Link to="/" className={`group flex items-center gap-3 select-none ${className}`}>
       {showIcon && (
@@ -11,8 +12,8 @@ export default function Logo({ className = "", showIcon = true }) {
           </div>
         </div>
       )}
-      <span className="text-2xl font-extrabold tracking-tight text-[#362217]">
-        Sky<span className="text-[#9E5D2D]">Forge</span>
+      <span className={`text-2xl font-extrabold tracking-tight ${tone === "light" ? "text-white" : "text-[#362217]"}`}>
+        Sky<span className={tone === "light" ? "text-[#E0A36E]" : "text-[#9E5D2D]"}>Forge</span>
       </span>
     </Link>
   );

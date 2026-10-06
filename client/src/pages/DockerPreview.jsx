@@ -344,7 +344,7 @@ export default function DockerPreview() {
 
       {/* Step 7: Existing Dockerfile Detection & Strategy Switcher */}
       {hasExistingDocker && (
-        <Card glow={false} className="bg-gradient-to-r from-[#FAF6F0] via-white to-[#FAF6F0] border-2 border-[#9E5D2D]/30 flex flex-col gap-4">
+        <Card glow={false} className="bg-gradient-to-r from-[#FAF6F0] to-[#F3EBE1] border-2 border-[#9E5D2D]/30 flex flex-col gap-4">
           <div className="flex items-start justify-between gap-4">
             <div className="flex items-start gap-3">
               <div className="p-2.5 rounded-2xl bg-[#9E5D2D]/10 text-[#9E5D2D] mt-0.5">

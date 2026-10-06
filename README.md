@@ -27,9 +27,12 @@ You connect GitHub and AWS, pick a repository, choose a deployment target, and p
 - [Build planner](#build-planner)
 - [Environment variables and services](#environment-variables-and-services)
 - [Databases](#databases)
+- [Where images are built](#where-images-are-built)
+- [AWS guide and readiness check](#aws-guide-and-readiness-check)
 - [Security](#security)
 - [Taking a site offline](#taking-a-site-offline)
 - [Destroy and verified teardown](#destroy-and-verified-teardown)
+- [After deploy](#after-deploy): auto-deploy, previews, custom domains, costs, logs and metrics, restore, status page
 - [Monitoring](#monitoring)
 - [Requirements](#requirements)
 - [Setup and local development](#setup-and-local-development)
@@ -60,6 +63,15 @@ You connect GitHub and AWS, pick a repository, choose a deployment target, and p
 | **Alerts and incident response** | Email, Slack, Discord, Telegram and signed webhooks. Every incident records what SkyForge did automatically (Under Attack mode, bans, restart, offline) and what you should do. |
 | **Site availability** | Take a site offline (maintenance page, container stopped) and bring it back without redeploying. |
 | **Verified teardown** | Deletes every project resource, then sweeps AWS by name and only succeeds once nothing remains. |
+| **Cloud builds** | Optionally build images in AWS CodeBuild inside your account (only the source is uploaded); falls back to a local build if AWS refuses or the build fails. |
+| **AWS guide and readiness check** | An in-app guide to AWS sign-up, verification, security, limits and costs, plus a live read-only check of the connected account. |
+| **Auto-deploy and previews** | Every push to the branch deploys automatically; every open pull request gets its own temporary preview, removed when the PR closes. |
+| **Custom domains** | Your own domain with a free AWS certificate, attached to CloudFront or the load balancer. |
+| **Costs and budget** | Account spend by day and service, per-site costs, a forecast, and a monthly budget that alerts (or takes sites offline). |
+| **App logs and metrics** | Live app output from CloudWatch plus CPU, memory, traffic, latency and error charts. |
+| **Restore any version** | Put any earlier working version back live without rebuilding. |
+| **Plain-English failures** | Failed deploys are explained with one-click fixes (port, memory, build location, settings). |
+| **Public status page** | A shareable uptime page with 90 days of history. |
 | **Monitoring** | Health checks every minute, scheduled security automation (bans, honey and canary keys, attack spikes, pushes, cost, rate-limit tuning, leaks, CVEs, door rotation), and automatic recovery after worker restarts. |
 
 ---
@@ -252,6 +264,62 @@ The managed database (`server/services/rdsService.js`):
 - allows plain connections for PostgreSQL (`rds.force_ssl=0` in a project parameter group), because many app drivers cannot verify the RDS certificate out of the box. Traffic never leaves the VPC.
 
 **One-Click Destroy deletes the database and its data** (no final snapshot, so nothing keeps billing), then its subnet group, parameter group and security group, and the verified sweep checks for all four. Taking a site offline does not stop the database.
+
+---
+
+## Where images are built
+
+The **Where to build** card on the Infrastructure page chooses, per project:
+
+| Option | What happens | Cost |
+|---|---|---|
+| **On this computer** (default) | Docker builds the image here and uploads it to ECR. | Free |
+| **In AWS (CodeBuild)** | Only the source archive (usually a few MB) is uploaded; AWS CodeBuild builds the image and pushes it to ECR inside AWS's network. Docker is not needed here. | About $0.01 per build minute; the first 100 minutes a month are free |
+
+Cloud builds (`server/services/cloudBuildService.js`):
+
+- create a shared builder in your account once: a private S3 bucket (`skyforge-builds-<account>-<region>`, archives expire after a day), an IAM role (`skyforge-codebuild`) that can only read that bucket, push to `skyforge-*` repositories and write its logs, and the CodeBuild project `skyforge-builder` (Linux, 4 vCPU / 7 GB). None of these cost anything while idle;
+- pull official base images (`node`, `python`, `nginx`, ...) from the Amazon ECR Public mirror of Docker Hub, avoiding Docker Hub's pull limits on shared build hosts;
+- stream the CodeBuild log into the deployment console.
+
+**AWS first, this computer second.** If AWS refuses a cloud build (new accounts often start with a CodeBuild limit of 0 concurrent builds) or the cloud build fails for any other reason, SkyForge logs why and builds locally instead. Only a cancelled deployment stops. To enable cloud builds on a new account, request a higher **Concurrently running builds** quota for CodeBuild in Service Quotas.
+
+**Slow or unstable connections.**
+
+- Local builds retry network failures (dropped registry connections, timeouts, DNS errors) up to 3 times, reusing finished steps. Errors in the app's own build are not retried.
+- Uploads to ECR retry up to 5 times. Layers that already reached AWS are skipped on each attempt.
+- An upload where no layer finishes for 4 minutes is restarted. The limit grows on each retry (10 minutes, then none), so a slow but working upload of a large layer is never cut off. The whole push may take up to 30 minutes (`PUSH_TIMEOUT_MS`, `PUSH_STALL_MS`).
+
+---
+
+## AWS guide and readiness check
+
+**AWS Guide** in the sidebar (`/dashboard/aws-guide`) explains everything an AWS account needs before deploying:
+
+- **Account:** sign-up and verification (email, card, phone, identity), and securing the account (root MFA, no root keys, IAM role or user).
+- **Setup:** connecting it to SkyForge, and choosing a region.
+- **Limits:** account verifications that unlock features (CloudFront, the CodeBuild quota, the Fargate vCPU quota, RDS).
+- **Money:** budgets and the free tier, and what each target costs.
+- **Deploying:** a pre-deployment checklist, and fixes for common error messages.
+- **Clean-up:** how to stop all charges.
+
+**Check my AWS account** runs read-only checks (`GET /api/aws/readiness`, `server/services/awsReadiness.js`); nothing is created or billed:
+
+| Check | Fails or warns when |
+|---|---|
+| Docker running, GitHub connected | Docker Desktop is stopped; no GitHub login |
+| AWS credentials work | Keys or role are invalid; **warns when connected with root user keys** |
+| This computer can reach the region | STS, ECR, ECS or S3 endpoints of the region do not answer |
+| Network | No VPC with two subnets in different zones |
+| Permissions | Read probes of ECR, ECS, load balancers, Secrets Manager, CloudWatch Logs, CloudFront, RDS and WAF are denied |
+| Fargate capacity | The Fargate On-Demand vCPU quota is below 2 (via Service Quotas) |
+| CloudFront, CodeBuild, RDS limits | AWS refused them in an earlier deployment (from the deployment history) |
+
+Each item says what was found and how to fix it.
+
+## Global search
+
+The search box in the top bar finds projects (name, repository, framework, status), a project's pages ("lexa security" opens Lexa's Security page), app pages, and AWS guide topics. Use the arrow keys and Enter, press **Ctrl+K** (or **/**) anywhere to focus it, and Esc to close it. On phones it opens from the search icon.
 
 ---
 
@@ -644,7 +712,70 @@ The monitor worker runs every minute for each live deployment. It:
 
 **Run all checks now** on the Security page runs every task immediately.
 
+Every health check is also added to an hourly uptime tally, which feeds the Monitoring page and the public status page. The worker also runs the [git watcher](#auto-deploy-on-push) every minute and the [budget check](#costs-and-budget) every 6 hours.
+
 Each check schedules the next, keyed by minute so that duplicate chains merge. When a worker starts, it **re-seeds monitoring for every live site**, so restarts never leave a site unwatched.
+
+---
+
+## After deploy
+
+Everything in this section is on a project's **Site settings**, **Monitoring** and console pages, or on the **Costs** and **Deployments** pages.
+
+### Auto-deploy on push
+
+Turn on **Deploy automatically when you push** and every new commit on the project's branch is deployed. The worker checks GitHub once a minute (`server/services/gitWatcher.js`); the first check only records where the branch is, so switching it on never redeploys an old commit. A push that can't deploy (for example, a missing environment variable) is recorded with the reason instead of failing silently.
+
+When SkyForge runs on a public server, set `GITHUB_WEBHOOK_SECRET` and add a GitHub webhook (`push` and `pull_request` events, content type JSON) pointing at `/api/github/webhook`. Webhooks are verified with the shared secret and trigger the same check immediately.
+
+### Pull-request previews
+
+With **Preview every pull request** on, each open pull request into the branch gets its own temporary copy of the site, rebuilt on every push to the PR and destroyed (with a verified teardown) when the PR is merged or closed. Previews:
+
+- are separate projects that copy the parent's settings and secrets, listed under the parent rather than on their own;
+- only come from branches of the same repository, never forks, so outside code never runs with your keys or AWS account;
+- are limited to 3 per project, because each runs its own container and load balancer (about $1.20/day while open).
+
+### Custom domains
+
+Add a domain on **Site settings** and SkyForge requests a free certificate from AWS Certificate Manager, then shows two DNS records: one proves you own the domain, the other points visitors at the site. Once AWS issues the certificate, SkyForge attaches it:
+
+| Site served by | Certificate region | What SkyForge changes |
+|---|---|---|
+| CloudFront (S3 + CloudFront, or ECS + CloudFront) | `us-east-1` | Adds the domain as an alias and the certificate to the distribution |
+| Load balancer (ECS Fargate) | the app's region | Adds an HTTPS listener on 443 (mirroring the HTTP listener, including the maintenance page while offline) and opens 443 on the load balancer's security group |
+
+The domain is re-attached after every redeploy. Removing the domain, or destroying the project, deletes the certificate.
+
+### Costs and budget
+
+The **Costs** page shows the whole account's spend this month (by day and by service, from AWS Cost Explorer), a straight-line forecast, and the monthly cost of each running site (measured from real traffic once SkyForge has seen it, otherwise estimated from its size). Cost Explorer charges $0.01 per request, so results are cached for 6 hours; **Refresh** fetches fresh numbers.
+
+Set a **monthly budget** and the worker compares it with your spend every 6 hours, alerting through your alert channels at 80%, when the forecast passes the budget, and when spend goes over. Optionally it also takes every site offline when spend goes over (load balancers keep billing until you destroy the projects). The deploy wizard shows "about $X/day" before you deploy.
+
+### Monitoring: app logs and metrics
+
+The **Monitoring** page shows, for the live version:
+
+- charts of CPU, memory, requests, response time and 4xx/5xx errors (ECS), or requests, error rate and data served (CloudFront), over 1 hour to 7 days;
+- 30 days of uptime from the once-a-minute health check;
+- the app's own output (stdout/stderr from CloudWatch Logs), live-tailed every 5 seconds, searchable, filterable by level and downloadable.
+
+### Restoring any earlier version
+
+The console's **Versions** list and the **Deployments** page can put any earlier successful version back live, not just the previous one. It reuses that version's task definition (or static release), so nothing is rebuilt, and the switch happens only after the old version passes health checks. SkyForge first checks that the old container image still exists in ECR.
+
+### Plain-English failures
+
+When a deployment fails, the console explains why in plain English and offers a one-click fix where one exists (`server/services/errorExplainer.js`). It recognises, among others: a port mismatch (read from the app's own "listening on" output), running out of memory, a missing environment variable, a database on `localhost`, missing packages, missing build scripts or tools, npm peer-dependency conflicts, Docker not running, the CodeBuild quota, missing AWS permissions, the Fargate quota, CloudFront not being enabled, and network failures. Fixes include changing the port or size and redeploying, switching where images are built, retrying, or opening the right settings page.
+
+### Deployment history
+
+The **Deployments** page is a timeline of every deploy across projects: who or what started it (you, a git push, a pull-request preview, a restore or a teardown), the commit, how long each step took, and what changed from the previous deploy (new code, settings changed, a different target, faster or slower), with a link to the code changes on GitHub.
+
+### Public status page
+
+Switch on a **public status page** and SkyForge gives you a link (`/status/<name>-<random>`) anyone can open, with no login: whether the site is up, 90 days of uptime and recent problems. It never shows your repository, account or AWS details, and **New link** retires the old address.
 
 ---
 
@@ -742,6 +873,8 @@ The Settings screen offers two ways to connect:
 - `ec2:AuthorizeSecurityGroupEgress` and `RevokeSecurityGroupEgress` for the outbound firewall;
 - `cloudwatch:GetMetricStatistics` for attack-spike detection, self-tuning limits, and the denial-of-wallet guard;
 - RDS instance, subnet-group and parameter-group actions plus `iam:CreateServiceLinkedRole` for the managed database;
+- CodeBuild project and build actions plus `s3:PutLifecycleConfiguration` for cloud builds;
+- `servicequotas:GetServiceQuota` for the readiness check;
 - ECR image scanning actions;
 - `logs:GetLogEvents`.
 
@@ -773,6 +906,7 @@ All server settings live in `server/.env`, which is loaded by `server/config/env
 | `DEPLOYMENT_WORKER_CONCURRENCY` | Parallel deployments per worker |
 | `TRUST_PROXY`, `SERVE_CLIENT`, `LOG_REDIS_ERRORS` | Reverse-proxy trust, serving `client/dist` from the API, Redis error logging |
 | `ATTACK_SPIKE_THRESHOLD` | Blocked requests per hour that count as an attack spike (default 300) |
+| `GITHUB_WEBHOOK_SECRET` | Enables `POST /api/github/webhook` for instant auto-deploys and previews (otherwise GitHub is checked once a minute) |
 
 `CLIENT_URL` is also used for the "open in SkyForge" link in alerts. Alert channels need no server configuration: each user enters their own on the Settings page.
 
@@ -798,6 +932,10 @@ All routes are under `/api`, and all except auth and the OAuth callback require 
 | Alerts | `GET /alerts`, `PUT /alerts`, `POST /alerts/test` |
 | Site availability | `POST /projects/:id/site/offline`, `POST /projects/:id/site/online` |
 | Deployments | `POST /deployments/project/:projectId`, `GET /deployments/project/:projectId`, `GET /deployments/:id`, `GET /deployments/:id/logs/stream` (SSE), `GET /deployments/:id/queue-position`, `POST /deployments/:id/retry`, `POST /deployments/:id/rollback`, `POST /deployments/project/:projectId/destroy` |
+| After deploy | `GET\|POST /projects/:id/automation`, `POST /projects/:id/automation/check`, `GET\|POST\|DELETE /projects/:id/domain`, `POST /projects/:id/domain/check`, `GET /projects/:id/cost/preview`, `GET /projects/:id/monitor/metrics`, `GET /projects/:id/monitor/logs`, `GET /projects/:id/monitor/uptime`, `POST /projects/:id/runtime`, `GET\|POST /projects/:id/status-page` |
+| History and recovery | `GET /deployments/history`, `GET /deployments/:id/diagnosis`, `POST /deployments/:id/restore` |
+| Costs | `GET /aws/costs`, `POST /aws/budget` |
+| Public | `GET /public/status/:slug` (no login), `POST /github/webhook` (signed by GitHub) |
 | Health | `GET /healthz`, `GET /readyz` |
 
 ---

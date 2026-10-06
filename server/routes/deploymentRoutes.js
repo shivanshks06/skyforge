@@ -8,6 +8,9 @@ import {
   getDeployment,
   streamDeploymentLogs,
   getProjectDeployments,
+  restoreDeployment,
+  getDiagnosis,
+  getDeploymentHistory,
 } from "../controllers/deploymentController.js";
 import protect from "../middleware/authMiddleware.js";
 import { rateLimit } from "../middleware/rateLimit.js";
@@ -31,7 +34,10 @@ const deploymentMutationLimit = rateLimit({
 
 // Authenticated deployment endpoints
 router.use(protect);
+router.get("/history", getDeploymentHistory);
 router.get("/:id/logs/stream", logStreamLimit, streamDeploymentLogs);
+router.get("/:id/diagnosis", getDiagnosis);
+router.post("/:id/restore", deploymentMutationLimit, restoreDeployment);
 router.post("/project/:projectId", deploymentMutationLimit, triggerDeployment);
 router.post("/project/:projectId/destroy", deploymentMutationLimit, destroyDeploymentInfrastructure);
 router.post("/:id/retry", deploymentMutationLimit, retryDeployment);

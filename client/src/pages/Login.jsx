@@ -37,7 +37,7 @@ export default function Login() {
   };
 
   return (
-    <div className="relative flex min-h-screen items-center justify-center bg-[#FAF8F5] p-4 text-[#362217] selection:bg-[#9E5D2D]/20">
+    <div className="app-bg relative flex min-h-screen items-center justify-center bg-[#FAF8F5] p-4 text-[#362217] selection:bg-[#9E5D2D]/20">
       {/* Background Glow Effects */}
       <div className="ambient-glow-teal top-1/4 right-1/3" />
       <div className="ambient-glow-bronze bottom-10 left-10" />

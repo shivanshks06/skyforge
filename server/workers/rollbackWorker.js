@@ -42,7 +42,8 @@ async function claimRollback({ deploymentId, projectId, userId, rollbackJobId })
     });
     if (!deployment || deployment.workerJobId !== rollbackJobId || !["LIVE", "ROLLED_BACK", "ROLLING_BACK"].includes(deployment.status)) return null;
     const newer = await tx.deployment.findFirst({
-      where: { projectId, id: { not: deploymentId }, createdAt: { gt: deployment.createdAt } },
+      // Failed or cancelled attempts after the live version never replaced it, so they don't block a rollback.
+      where: { projectId, id: { not: deploymentId }, createdAt: { gt: deployment.createdAt }, status: { notIn: ["FAILED", "CANCELLED"] } },
       select: { id: true },
     });
     if (newer) return null;
@@ -74,7 +75,7 @@ export async function processRollbackJob(job) {
     const previousResources = previous.resources || {};
     const credentials = await credentialsFor(userId);
     const resourceCredentials = currentResources.region ? { ...credentials, region: currentResources.region } : credentials;
-    emitDeploymentLog(deploymentId, { stage: "ROLLBACK", message: `[ROLLBACK] Restoring the previous verified deployment revision. Reason: ${reason || "manual rollback"}`, level: "warn" });
+    emitDeploymentLog(deploymentId, { stage: "ROLLBACK", message: `[ROLLBACK] Restoring an earlier verified version. Reason: ${reason || "manual rollback"}`, level: "warn" });
     if (currentResources.type === "ECS_FARGATE") {
       await rollbackEcs({ credentials: resourceCredentials, resources: currentResources, previousTaskDefinitionArn: previousResources.taskDefinitionArn });
     } else if (currentResources.type === "S3_CLOUDFRONT") {

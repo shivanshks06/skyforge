@@ -17,7 +17,11 @@ import {
   getSecurity, setSecurityTier, setUnderAttack, unbanIp, runSecurityScan, createSecurityFix, takeOffline, bringOnline,
   updateSecuritySettings, getIncidents, resolveIncident, runChecksNow, rotateAdminDoor, replayAttacks, runRedTeamRehearsal, getBlastRadius, getCostEstimate,
 } from "../controllers/securityController.js";
-import { getDatabase, updateDatabase } from "../controllers/databaseController.js";
+import { getDatabase, updateDatabase, updateBuildMode } from "../controllers/databaseController.js";
+import {
+  getAutomation, updateAutomation, checkGitNow, getDomain, addDomain, checkDomain, deleteDomain, getCostPreview,
+  getMetrics, getAppLogs, getUptime, updateRuntime, getStatusPage, updateStatusPage,
+} from "../controllers/automationController.js";
 import protect from "../middleware/authMiddleware.js";
 import { rateLimit } from "../middleware/rateLimit.js";
 
@@ -61,6 +65,7 @@ router.get("/:id/infrastructure", blueprintMutationLimit, getInfrastructure);
 router.post("/:id/infrastructure/target", blueprintMutationLimit, updateInfrastructureTarget);
 router.get("/:id/database", getDatabase);
 router.post("/:id/database", blueprintMutationLimit, updateDatabase);
+router.post("/:id/build-mode", blueprintMutationLimit, updateBuildMode);
 
 // Security tiers, scans, firewall controls, and taking the site offline without destroying it
 const securityLimit = rateLimit({
@@ -87,5 +92,28 @@ router.get("/:id/security/blast-radius", getBlastRadius);
 router.get("/:id/security/cost", getCostEstimate);
 router.post("/:id/site/offline", securityLimit, takeOffline);
 router.post("/:id/site/online", securityLimit, bringOnline);
+
+// Auto-deploy, previews, custom domain, monitoring, runtime settings, status page
+const monitorLimit = rateLimit({
+  windowMs: 60 * 1000,
+  max: 60,
+  prefix: "project-monitoring",
+  keyResolver: (req) => req.user?.id || req.ip,
+  message: "Too many monitoring requests. Slow down a little.",
+});
+router.get("/:id/automation", getAutomation);
+router.post("/:id/automation", blueprintMutationLimit, updateAutomation);
+router.post("/:id/automation/check", planningLimit, checkGitNow);
+router.get("/:id/domain", getDomain);
+router.post("/:id/domain", securityLimit, addDomain);
+router.post("/:id/domain/check", securityLimit, checkDomain);
+router.delete("/:id/domain", securityLimit, deleteDomain);
+router.get("/:id/cost/preview", getCostPreview);
+router.get("/:id/monitor/metrics", monitorLimit, getMetrics);
+router.get("/:id/monitor/logs", monitorLimit, getAppLogs);
+router.get("/:id/monitor/uptime", monitorLimit, getUptime);
+router.post("/:id/runtime", blueprintMutationLimit, updateRuntime);
+router.get("/:id/status-page", getStatusPage);
+router.post("/:id/status-page", blueprintMutationLimit, updateStatusPage);
 
 export default router;

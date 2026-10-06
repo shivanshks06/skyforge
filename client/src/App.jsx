@@ -16,6 +16,12 @@ const DockerPreview = lazy(() => import("./pages/DockerPreview"));
 const InfrastructurePreview = lazy(() => import("./pages/InfrastructurePreview"));
 const DeploymentConsole = lazy(() => import("./pages/DeploymentConsole"));
 const Security = lazy(() => import("./pages/Security"));
+const AwsGuide = lazy(() => import("./pages/AwsGuide"));
+const NewDeployment = lazy(() => import("./pages/NewDeployment"));
+const Monitoring = lazy(() => import("./pages/Monitoring"));
+const ProjectSettings = lazy(() => import("./pages/ProjectSettings"));
+const Costs = lazy(() => import("./pages/Costs"));
+const StatusPage = lazy(() => import("./pages/StatusPage"));
 const NotFound = lazy(() => import("./pages/NotFound"));
 
 function LoadingScreen() {
@@ -40,6 +46,9 @@ export default function App() {
               <Route path="projects/:id/deploy" element={<DeploymentConsole />} />
               <Route path="deployments" element={<Deployments />} />
               <Route path="settings" element={<Settings />} />
+              <Route path="aws-guide" element={<AwsGuide />} />
+              <Route path="new" element={<NewDeployment />} />
+              <Route path="costs" element={<Costs />} />
             </Route>
             <Route path="/project/:id/plan" element={<ProtectedRoute><DashboardLayout /></ProtectedRoute>}>
               <Route index element={<DeploymentPlan />} />
@@ -56,6 +65,14 @@ export default function App() {
             <Route path="/project/:id/security" element={<ProtectedRoute><DashboardLayout /></ProtectedRoute>}>
               <Route index element={<Security />} />
             </Route>
+            <Route path="/project/:id/monitor" element={<ProtectedRoute><DashboardLayout /></ProtectedRoute>}>
+              <Route index element={<Monitoring />} />
+            </Route>
+            <Route path="/project/:id/settings" element={<ProtectedRoute><DashboardLayout /></ProtectedRoute>}>
+              <Route index element={<ProjectSettings />} />
+            </Route>
+            {/* Public status pages: no login. */}
+            <Route path="/status/:slug" element={<StatusPage />} />
             <Route path="*" element={<NotFound />} />
           </Routes>
         </Suspense>

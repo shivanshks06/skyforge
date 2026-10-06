@@ -50,6 +50,10 @@ export function runCommand(command, args = [], options = {}) {
     timeout = 120_000,
     input,
     maxOutput = 200_000,
+    // Kill the command when no line matching isProgress arrives for stallTimeout ms (e.g. a
+    // docker push whose layers sit at "Waiting" forever).
+    stallTimeout = 0,
+    isProgress = () => true,
   } = options;
 
   // On Windows, npm/npx are .cmd scripts and require shell: true. On POSIX,
@@ -77,10 +81,27 @@ export function runCommand(command, args = [], options = {}) {
       finish(new Error(`${command} timed out after ${timeout}ms`), undefined, true);
     }, timeout);
 
+    let stallTimer;
+    const armStall = () => {
+      if (!stallTimeout) return;
+      clearTimeout(stallTimer);
+      stallTimer = setTimeout(() => {
+        terminateChild(child, false);
+        forceKillTimer = setTimeout(() => terminateChild(child, true), 5_000);
+        finish(new Error(`${command} stalled: no progress for ${Math.round(stallTimeout / 1000)}s`), undefined, true);
+      }, stallTimeout);
+    };
+    armStall();
+    const lineHandler = (line, stream) => {
+      if (stallTimeout && isProgress(line)) armStall();
+      onLine?.(line, stream);
+    };
+
     const finish = (error, result, preserveForceKill = false) => {
       if (settled) return;
       settled = true;
       clearTimeout(timer);
+      clearTimeout(stallTimer);
       if (!preserveForceKill) clearTimeout(forceKillTimer);
       if (error) reject(error);
       else resolve(result);
@@ -89,8 +110,8 @@ export function runCommand(command, args = [], options = {}) {
     const collect = (chunk, stream) => {
       const text = chunk.toString();
       output = `${output}${text}`.slice(-maxOutput);
-      if (stream === "stdout") stdoutBuffer = appendOutputLine(stdoutBuffer, text, stream, onLine);
-      else stderrBuffer = appendOutputLine(stderrBuffer, text, stream, onLine);
+      if (stream === "stdout") stdoutBuffer = appendOutputLine(stdoutBuffer, text, stream, lineHandler);
+      else stderrBuffer = appendOutputLine(stderrBuffer, text, stream, lineHandler);
     };
 
     child.stdin.on("error", () => {});
@@ -99,8 +120,8 @@ export function runCommand(command, args = [], options = {}) {
     child.on("error", (error) => finish(error));
     child.on("close", (code, signal) => {
       clearTimeout(forceKillTimer);
-      emitLine(onLine, "stdout", stdoutBuffer);
-      emitLine(onLine, "stderr", stderrBuffer);
+      emitLine(lineHandler, "stdout", stdoutBuffer);
+      emitLine(lineHandler, "stderr", stderrBuffer);
       if (code === 0) {
         finish(null, { code, output });
       } else {
