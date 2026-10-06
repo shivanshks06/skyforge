@@ -45,3 +45,26 @@ export const updateDatabase = async (req, res) => {
     return res.status(error.statusCode || 500).json({ message: error.statusCode ? error.message : "Failed to update database settings" });
   }
 };
+
+/**
+ * POST { mode: "local" | "cloud" }: where the container image is built.
+ * "cloud" builds in AWS CodeBuild inside the user's account (only the source archive is uploaded),
+ * which is much faster and more reliable on slow or unstable connections.
+ */
+export const updateBuildMode = async (req, res) => {
+  try {
+    const project = await requireOwnedProject(req.params.id, req.user?.id);
+    await assertProjectHasNoActiveOperation(project.id);
+    const mode = req.body?.mode;
+    if (!["local", "cloud"].includes(mode)) return res.status(400).json({ message: "mode must be local or cloud." });
+    await prisma.project.update({ where: { id: project.id }, data: { buildMode: mode } });
+    return res.json({
+      mode,
+      message: mode === "cloud"
+        ? "Builds now run in AWS CodeBuild in your account: only the source code is uploaded from this machine. About $0.01 per build minute (the first 100 minutes each month are free). Static sites (S3 target) still build here."
+        : "Builds now run on this machine with Docker, and the image is uploaded to AWS.",
+    });
+  } catch (error) {
+    return res.status(error.statusCode || 500).json({ message: error.statusCode ? error.message : "Failed to change where builds run" });
+  }
+};

@@ -1,3 +1,4 @@
+import { releaseCustomDomain } from "./domainService.js";
 import fs from "node:fs";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
@@ -233,6 +234,10 @@ export async function destroyProjectInfrastructure({ projectId, deploymentId, us
     }
     if (credentials) await sweepAndVerify({ credentials, project, deploymentId: operation.id });
     else emitDeploymentLog(operation.id, { stage: "DESTROY", message: "[SWEEP] No AWS connection; the leftover-resource sweep was skipped.", level: "warn" });
+    // The custom-domain certificate outlives the load balancer / distribution, so it is removed here.
+    await releaseCustomDomain({ projectId, credentials, log: (message, level) => emitDeploymentLog(operation.id, { stage: "DESTROY", message, level }) }).catch((domainError) => {
+      emitDeploymentLog(operation.id, { stage: "DESTROY", message: `[DOMAIN] The custom-domain certificate could not be deleted yet: ${String(domainError.message).slice(0, 160)}. It is free, but you can delete it in AWS Certificate Manager.`, level: "warn" });
+    });
 
     const projectDir = path.resolve(GENERATED_DIR, projectId);
     if (projectDir.startsWith(`${GENERATED_DIR}${path.sep}`) && fs.existsSync(projectDir)) {

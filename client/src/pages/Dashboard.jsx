@@ -17,7 +17,10 @@ import {
   RefreshCw
 } from "lucide-react";
 import { AuthContext } from "../context/authContext.js";
-import { getGithubLoginUrl, getGithubRepos, getProjectDeployments, createProject, getProjects, analyzeRepository } from "../services/api";
+import { getGithubLoginUrl, getGithubRepos, getProjectDeployments, createProject, getProjects, analyzeRepository, getAwsStatus } from "../services/api";
+import StatusBadge, { StatusDot } from "../components/StatusBadge";
+import { projectState } from "../utils/projectState";
+import { startTour } from "../utils/tour";
 
 export default function Dashboard() {
   const { user, isGithubConnected, githubAccount } = useContext(AuthContext);
@@ -31,6 +34,7 @@ export default function Dashboard() {
   const [isScanning, setIsScanning] = useState(false);
   const [importing, setImporting] = useState(false);
   const [toast, setToast] = useState(null);
+  const [aws, setAws] = useState(null);
   const analysisRequestRef = useRef(0);
 
   const showToast = (message, type = "info") => {
@@ -48,6 +52,7 @@ export default function Dashboard() {
 
   const fetchDashboardData = async () => {
     let currentProjects = [];
+    getAwsStatus().then(setAws).catch(() => setAws({ connected: false }));
     try {
       const projData = await getProjects();
       if (Array.isArray(projData)) {
@@ -169,11 +174,13 @@ export default function Dashboard() {
     }
   };
 
+  const liveProjects = projects.filter((project) => projectState(project) === "live");
+  const attention = projects.filter((project) => projectState(project) === "failed");
   const stats = [
-    { label: "Active Projects", value: `${projects.length}`, icon: FolderGit2, color: "text-[#9E5D2D] bg-[#9E5D2D]/10 border-[#9E5D2D]/20" },
-    { label: "Deployments", value: `${deploymentCount}`, icon: Rocket, color: "text-[#2A6668] bg-[#2A6668]/10 border-[#2A6668]/20" },
-    { label: "Intelligence Engine", value: "Active", icon: Cpu, color: "text-[#2E6B4F] bg-[#2E6B4F]/10 border-[#2E6B4F]/20" },
-    { label: "Cloud Provider", value: "AWS ECS", icon: Cloud, color: "text-[#3B7A75] bg-[#3B7A75]/10 border-[#3B7A75]/20" },
+    { label: "Projects", value: `${projects.length}`, icon: FolderGit2, color: "text-[#9E5D2D] bg-[#9E5D2D]/10 border-[#9E5D2D]/20", onClick: () => navigate("/dashboard/projects") },
+    { label: "Live sites", value: `${liveProjects.length}`, icon: Cloud, color: "text-[#2E6B4F] bg-[#2E6B4F]/10 border-[#2E6B4F]/20", onClick: () => navigate("/dashboard/projects") },
+    { label: "Deployments", value: `${deploymentCount}`, icon: Rocket, color: "text-[#2A6668] bg-[#2A6668]/10 border-[#2A6668]/20", onClick: () => navigate("/dashboard/deployments") },
+    { label: "Need attention", value: `${attention.length}`, icon: Cpu, color: attention.length ? "text-[#9E2A2B] bg-[#9E2A2B]/10 border-[#9E2A2B]/20" : "text-[#8C7667] bg-[#FAF8F5] border-[#EAE1D5]", onClick: () => navigate(attention[0] ? `/project/${attention[0].id}/deploy` : "/dashboard/projects") },
   ];
 
   const quickActions = [
@@ -220,15 +227,14 @@ export default function Dashboard() {
         <div className="flex flex-col gap-1.5">
           <div className="flex items-center gap-2">
             <span className="px-2.5 py-0.5 rounded-full bg-[#9E5D2D] text-[10px] font-bold tracking-wider uppercase">
-              Production Ready
+              {liveProjects.length ? `${liveProjects.length} live` : "Ready"}
             </span>
-            <span className="text-xs text-[#D8CCC0]">Repository Intelligence Engine</span>
           </div>
           <h2 className="text-2xl sm:text-3xl font-bold text-white tracking-tight">
-            Welcome back, {user?.name || "Developer"}
+            Welcome back, {String(user?.name || "Developer").split(" ")[0].replace(/^./, (letter) => letter.toUpperCase())}
           </h2>
           <p className="text-xs text-[#D8CCC0] max-w-xl leading-relaxed">
-            Deterministic AST & lockfile detection ready. Import any repository to instantly analyze framework, commands, ports, and environment variables.
+            Pick a GitHub repository below and SkyForge works out how to build it, then deploys it to your own AWS account.
           </p>
         </div>
 
@@ -261,7 +267,7 @@ export default function Dashboard() {
       {/* Stats Grid */}
       <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-4 gap-5">
         {stats.map((stat, idx) => (
-          <Card key={idx} hoverable={true} className="flex items-center justify-between bg-white border border-[#EAE1D5]">
+          <Card key={idx} glow={false} role="button" tabIndex={0} onClick={stat.onClick} onKeyDown={(event) => event.key === "Enter" && stat.onClick()} className="lift cursor-pointer flex items-center justify-between bg-white border border-[#EAE1D5]">
             <div className="flex flex-col gap-1">
               <span className="text-xs font-medium text-[#5E4C3E]">{stat.label}</span>
               <span className="text-2xl font-bold text-[#362217] tracking-tight">{stat.value}</span>
@@ -273,16 +279,73 @@ export default function Dashboard() {
         ))}
       </div>
 
+      {(() => {
+        const steps = [
+          { label: "Connect your AWS account", done: Boolean(aws?.connected), action: () => navigate("/dashboard/settings"), cta: "Connect" },
+          { label: "Connect GitHub", done: Boolean(isGithubConnected), action: handleConnectGitHub, cta: "Connect" },
+          { label: "Import a repository", done: projects.length > 0, action: () => navigate("/dashboard/new"), cta: "Choose one" },
+          { label: "Deploy your first site", done: projects.some((project) => project.latestDeployment), action: () => navigate("/dashboard/new"), cta: "Deploy" },
+        ];
+        const done = steps.filter((step) => step.done).length;
+        if (done === steps.length) return null;
+        return (
+          <Card glow={false} className="bg-white border border-[#EAE1D5] flex flex-col gap-4">
+            <div className="flex flex-wrap items-center justify-between gap-2">
+              <div>
+                <h3 className="text-base font-bold text-[#362217]">Getting started</h3>
+                <p className="text-xs text-[#5E4C3E]">{done} of {steps.length} done. Each step takes a minute or two. New to AWS? Read the <button type="button" onClick={() => navigate("/dashboard/aws-guide")} className="font-semibold text-[#9E5D2D] hover:underline">AWS guide</button>, or <button type="button" onClick={startTour} className="font-semibold text-[#9E5D2D] hover:underline">take a 30-second tour</button>.</p>
+              </div>
+              <div className="h-2 w-40 overflow-hidden rounded-full bg-[#F0E7DC]"><div className="h-full rounded-full bg-[#9E5D2D] transition-all duration-500" style={{ width: `${(done / steps.length) * 100}%` }} /></div>
+            </div>
+            <ol className="grid grid-cols-1 md:grid-cols-4 gap-3">
+              {steps.map((step, index) => (
+                <li key={step.label} className={`flex flex-col gap-2 rounded-2xl border p-3 ${step.done ? "border-[#2E6B4F]/25 bg-[#2E6B4F]/5" : "border-[#EADFCF] bg-[#FFFBF6]"}`}>
+                  <span className="flex items-center gap-2 text-xs font-bold text-[#362217]">
+                    {step.done ? <CheckCircle2 className="h-4 w-4 text-[#2E6B4F]" /> : <span className="flex h-5 w-5 items-center justify-center rounded-full bg-[#9E5D2D] text-[10px] text-white">{index + 1}</span>}
+                    {step.label}
+                  </span>
+                  {!step.done && <button type="button" onClick={step.action} className="self-start rounded-lg bg-[#9E5D2D] px-3 py-1 text-[11px] font-semibold text-white transition hover:bg-[#8A5026]">{step.cta}</button>}
+                </li>
+              ))}
+            </ol>
+          </Card>
+        );
+      })()}
+
+      {liveProjects.length > 0 && (
+        <div className="flex flex-col gap-3">
+          <h3 className="text-lg font-bold text-[#362217]">Your live sites</h3>
+          <div className="grid grid-cols-1 md:grid-cols-2 xl:grid-cols-3 gap-4">
+            {liveProjects.map((project) => (
+              <Card key={project.id} glow={false} className="lift bg-white border border-[#EAE1D5] flex flex-col gap-3">
+                <div className="flex items-center justify-between gap-2">
+                  <span className="flex items-center gap-2 font-bold text-[#362217] truncate"><StatusDot state="live" /> {project.name}</span>
+                  <StatusBadge state="live" size="xs" />
+                </div>
+                {project.latestDeployment?.liveUrl && (
+                  <a href={project.latestDeployment.liveUrl} target="_blank" rel="noreferrer" className="truncate font-mono text-[11px] text-[#9E5D2D] hover:underline">{project.latestDeployment.liveUrl.replace(/^https?:\/\//, "")}</a>
+                )}
+                <div className="flex gap-2">
+                  {project.latestDeployment?.liveUrl && <a href={project.latestDeployment.liveUrl} target="_blank" rel="noreferrer" className="inline-flex items-center gap-1 rounded-lg bg-[#9E5D2D] px-3 py-1.5 text-xs font-semibold text-white transition hover:bg-[#8A5026]"><ExternalLink className="h-3.5 w-3.5" /> Open site</a>}
+                  <button type="button" onClick={() => navigate(`/project/${project.id}/deploy`)} className="rounded-lg border border-[#DCD0C3] px-3 py-1.5 text-xs font-semibold text-[#5E4C3E] transition hover:bg-[#FAF6F0]">Console</button>
+                  <button type="button" onClick={() => navigate(`/project/${project.id}/security`)} className="rounded-lg border border-[#DCD0C3] px-3 py-1.5 text-xs font-semibold text-[#5E4C3E] transition hover:bg-[#FAF6F0]">Security</button>
+                </div>
+              </Card>
+            ))}
+          </div>
+        </div>
+      )}
+
       {/* GitHub Repositories & Intelligence Scanner Section */}
       <div className="flex flex-col gap-4">
         <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-2">
           <div>
             <h3 className="text-lg font-bold text-[#362217] flex items-center gap-2">
               <Cpu className="h-5 w-5 text-[#9E5D2D]" />
-              <span>Repository Intelligence Engine</span>
+              <span id="import-repositories" className="scroll-mt-24">Import a repository</span>
             </h3>
             <p className="text-xs text-[#5E4C3E] mt-0.5">
-              Deterministic rule-based analysis: Framework, Package Manager, Commands, Ports, Docker, and Env variables.
+              Your GitHub repositories. SkyForge detects the framework, commands, port and settings each one needs.
             </p>
           </div>
 

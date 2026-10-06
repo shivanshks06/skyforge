@@ -10,6 +10,14 @@
       content="SkyForge plans, builds, deploys, monitors, and rolls back applications on AWS."
     />
     <title>SkyForge — AWS deployment platform</title>
+    <script>
+      // Apply the saved (or system) theme before the first paint, so dark mode never flashes light.
+      try {
+        var saved = localStorage.getItem("skyforge.theme");
+        var dark = saved ? saved === "dark" : window.matchMedia("(prefers-color-scheme: dark)").matches;
+        if (dark) document.documentElement.classList.add("dark");
+      } catch (error) {}
+    </script>
   </head>
   <body>
     <div id="root"></div>

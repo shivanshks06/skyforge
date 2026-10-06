@@ -45,6 +45,14 @@ const publicProjectFields = {
   terraformGenerated: true,
   terraformPath: true,
   estimatedCost: true,
+  buildMode: true,
+  autoDeploy: true,
+  previewsEnabled: true,
+  parentProjectId: true,
+  previewPr: true,
+  gitWatch: true,
+  customDomain: true,
+  statusPage: true,
   createdAt: true,
   updatedAt: true,
   // envConfig intentionally excluded - use getProjectById to access env vars
@@ -204,10 +212,19 @@ export const getProjects = async (req, res) => {
     const projects = await prisma.project.findMany({
       where: { userId },
       orderBy: { createdAt: "desc" },
-      select: publicProjectFields,
+      select: {
+        ...publicProjectFields,
+        // The newest deployment tells the UI whether the site is live and where.
+        deployments: { orderBy: { createdAt: "desc" }, take: 1, select: { id: true, status: true, liveUrl: true, createdAt: true, completedAt: true } },
+      },
     });
 
-    return res.json(projects.map(toPublicProject));
+    // Pull-request previews are listed under their main project, not as projects of their own.
+    const shaped = projects.map(({ deployments, ...project }) => ({ ...toPublicProject(project), latestDeployment: deployments?.[0] || null }));
+    const previews = shaped.filter((project) => project.parentProjectId);
+    return res.json(shaped
+      .filter((project) => !project.parentProjectId)
+      .map((project) => ({ ...project, previews: previews.filter((preview) => preview.parentProjectId === project.id) })));
   } catch (error) {
     console.error("Error fetching projects:", error);
     return res.status(500).json({ message: "Failed to fetch projects" });
@@ -243,6 +260,8 @@ export const deleteProject = async (req, res) => {
         select: { id: true, status: true },
       });
       if (inFlightDeployment) return { conflict: "active", deployment: inFlightDeployment };
+      const preview = await tx.project.findFirst({ where: { parentProjectId: project.id }, select: { id: true } });
+      if (preview) return { conflict: "previews" };
 
       const undeployedResources = await tx.deployment.findFirst({
         where: { projectId: project.id, resources: { not: Prisma.AnyNull }, status: { not: "DESTROYED" } },
@@ -262,6 +281,9 @@ export const deleteProject = async (req, res) => {
         deploymentStatus: deletion.deployment.status,
         canForce: false,
       });
+    }
+    if (deletion.conflict === "previews") {
+      return res.status(409).json({ message: "This project still has pull-request previews. Turn previews off; SkyForge removes them within a few minutes, then delete the project." });
     }
     if (deletion.conflict === "resources") {
       return res.status(409).json({

@@ -5,7 +5,9 @@ import {
   connectAwsRole,
   saveAwsCredentials,
   disconnectAws,
+  getAwsReadiness,
 } from "../controllers/awsConnectionController.js";
+import { getCosts, updateBudget } from "../controllers/costController.js";
 import protect from "../middleware/authMiddleware.js";
 import { rateLimit } from "../middleware/rateLimit.js";
 
@@ -25,5 +27,8 @@ router.post("/setup", initiateAwsSetup);
 router.post("/connect", awsVerificationLimit, connectAwsRole);
 router.post("/credentials", awsVerificationLimit, saveAwsCredentials);
 router.post("/disconnect", disconnectAws);
+router.get("/readiness", awsVerificationLimit, getAwsReadiness);
+router.get("/costs", getCosts);
+router.post("/budget", updateBudget);
 
 export default router;

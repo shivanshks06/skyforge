@@ -22,6 +22,8 @@ import projectRoutes from "./routes/projectRoutes.js";
 import awsRoutes from "./routes/awsRoutes.js";
 import deploymentRoutes from "./routes/deploymentRoutes.js";
 import alertRoutes from "./routes/alertRoutes.js";
+import { getPublicStatus } from "./controllers/costController.js";
+import { rateLimit } from "./middleware/rateLimit.js";
 import { encryptSecret } from "./services/secretService.js";
 import { closeActiveLogStreams } from "./services/logsService.js";
 
@@ -109,7 +111,13 @@ app.use(cors({
   },
   credentials: true,
 }));
-app.use(express.json({ limit: "2mb" }));
+app.use(express.json({
+  limit: "2mb",
+  // GitHub webhooks are verified against the exact bytes GitHub signed.
+  verify: (req, _res, buffer) => {
+    if (req.originalUrl.startsWith("/api/github/webhook")) req.rawBody = buffer;
+  },
+}));
 app.use(express.urlencoded({ extended: false, limit: "2mb" }));
 
 app.get(["/healthz", "/api/health"], (_req, res) => res.json({ status: "ok", service: "skyforge-api" }));
@@ -134,6 +142,8 @@ app.use("/api/projects", projectRoutes);
 app.use("/api/aws", awsRoutes);
 app.use("/api/deployments", deploymentRoutes);
 app.use("/api/alerts", alertRoutes);
+// Public status pages (no login).
+app.get("/api/public/status/:slug", rateLimit({ windowMs: 60 * 1000, max: 120, prefix: "public-status", message: "Too many requests." }), getPublicStatus);
 
 const clientDist = path.resolve(__dirname, "../client/dist");
 if (process.env.SERVE_CLIENT === "true" && fs.existsSync(clientDist)) {

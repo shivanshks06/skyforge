@@ -1133,6 +1133,13 @@ async function listenerFor(elbv2, resources) {
   return listeners.Listeners?.find((listener) => listener.Port === 80)?.ListenerArn;
 }
 
+/** The HTTPS listener a custom domain adds; it always mirrors the HTTP listener's default action. */
+async function httpsListenerFor(elbv2, resources) {
+  if (!resources.loadBalancerArn) return null;
+  const listeners = await elbv2.send(new DescribeListenersCommand({ LoadBalancerArn: resources.loadBalancerArn })).catch(() => ({ Listeners: [] }));
+  return listeners.Listeners?.find((listener) => listener.Port === 443)?.ListenerArn || null;
+}
+
 /**
  * Takes the site offline without destroying it: the load balancer serves a maintenance page and
  * the service scales to zero tasks (no container charges; the load balancer still bills hourly).
@@ -1142,10 +1149,10 @@ export async function takeSiteOffline({ credentials, resources }) {
   const elbv2 = new ELBV2Client(config);
   const listenerArn = await listenerFor(elbv2, resources);
   if (!listenerArn) throw new Error("The load balancer listener for this site was not found.");
-  await elbv2.send(new ModifyListenerCommand({
-    ListenerArn: listenerArn,
-    DefaultActions: [{ Type: "fixed-response", FixedResponseConfig: { StatusCode: "503", ContentType: "text/html", MessageBody: MAINTENANCE_PAGE } }],
-  }));
+  const maintenance = [{ Type: "fixed-response", FixedResponseConfig: { StatusCode: "503", ContentType: "text/html", MessageBody: MAINTENANCE_PAGE } }];
+  await elbv2.send(new ModifyListenerCommand({ ListenerArn: listenerArn, DefaultActions: maintenance }));
+  const httpsListener = await httpsListenerFor(elbv2, resources);
+  if (httpsListener) await elbv2.send(new ModifyListenerCommand({ ListenerArn: httpsListener, DefaultActions: maintenance }));
   await new ECSClient(config).send(new UpdateServiceCommand({ cluster: resources.clusterName, service: resources.serviceName, desiredCount: 0 }));
 }
 
@@ -1174,6 +1181,8 @@ export async function routeTrafficToAppWhenHealthy({ credentials, resources }) {
   const health = await elbv2.send(new DescribeTargetHealthCommand({ TargetGroupArn: resources.targetGroupArn }));
   if (!(health.TargetHealthDescriptions || []).some((target) => target.TargetHealth?.State === "healthy")) return false;
   await elbv2.send(new ModifyListenerCommand({ ListenerArn: listenerArn, DefaultActions: [{ Type: "forward", TargetGroupArn: resources.targetGroupArn }] }));
+  const httpsListener = await httpsListenerFor(elbv2, resources);
+  if (httpsListener) await elbv2.send(new ModifyListenerCommand({ ListenerArn: httpsListener, DefaultActions: [{ Type: "forward", TargetGroupArn: resources.targetGroupArn }] }));
   if (warmup?.RuleArn) await elbv2.send(new DeleteRuleCommand({ RuleArn: warmup.RuleArn })).catch(() => {});
   return true;
 }

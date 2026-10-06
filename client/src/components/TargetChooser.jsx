@@ -9,7 +9,7 @@ const ICONS = { AWS_ECS_FARGATE: Server, AWS_ECS_CLOUDFRONT: Zap, AWS_S3_CLOUDFR
  */
 export default function TargetChooser({ choices = [], selected, onChoose, busy }) {
   return (
-    <Card glow={false} className="bg-gradient-to-r from-[#FAF6F0] via-white to-[#FAF6F0] border border-[#EADFCF] flex flex-col gap-4">
+    <Card glow={false} className="bg-gradient-to-r from-[#FAF6F0] to-[#F3EBE1] border border-[#EADFCF] flex flex-col gap-4">
       <div>
         <h3 className="text-base font-bold text-[#362217]">Choose where to deploy</h3>
         <p className="text-xs text-[#5E4C3E] mt-0.5">

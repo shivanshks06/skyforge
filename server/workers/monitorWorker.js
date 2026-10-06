@@ -8,6 +8,7 @@ import { getAwsCredentials } from "../services/awsConnectionService.js";
 import { routeTrafficToAppWhenHealthy } from "../services/ecsService.js";
 import { runSecurityAutomation, recordHealth } from "../services/securityAutomation.js";
 import { patchProtection } from "../services/securityService.js";
+import { recordUptime } from "../services/statusService.js";
 
 // One automation run per project at a time; the monitor fires every minute.
 const automationRunning = new Set();
@@ -60,11 +61,13 @@ export async function processMonitorJob(job) {
       const healthPath = typeof deployment.project?.healthCheck === "string" && /^\/[A-Za-z0-9/_-]*$/.test(deployment.project.healthCheck) ? deployment.project.healthCheck : "/";
       const result = await probeEndpoint(liveUrl || deployment.liveUrl, { attempts: 1, timeoutMs: 10_000, ...(target === "ECS_FARGATE" ? { path: healthPath } : {}) });
       await prisma.deployment.update({ where: { id: deploymentId }, data: { healthStatus: "HEALTHY", latencyMs: result.latencyMs, updatedAt: new Date() } });
+      await recordUptime(deployment.projectId, true, result.latencyMs).catch(() => {});
       await recordHealth({ project: await prisma.project.findUnique({ where: { id: deployment.projectId } }), resources: deployment.resources, deploymentId, healthy: true }).catch(() => {});
       emitDeploymentLog(deploymentId, { stage: "MONITOR", message: `[MONITOR] ${result.endpoint} returned HTTP ${result.status} in ${result.latencyMs}ms.`, level: "info" });
       await addMonitorJob({ deploymentId, liveUrl: liveUrl || deployment.liveUrl, target }, { delay: 60_000, jobId: nextMonitorJobId(deploymentId) });
     } catch (error) {
       await prisma.deployment.update({ where: { id: deploymentId }, data: { healthStatus: "UNHEALTHY" } });
+      await recordUptime(deployment.projectId, false).catch(() => {});
       await recordHealth({ project: await prisma.project.findUnique({ where: { id: deployment.projectId } }), credentials: await projectCredentials(deployment.project.userId), resources: deployment.resources, deploymentId, healthy: false, error: error.message }).catch(() => {});
       emitDeploymentLog(deploymentId, { stage: "MONITOR", message: `[MONITOR] Health probe failed: ${error.message}`, level: "error" });
       await addMonitorJob({ deploymentId, liveUrl: liveUrl || deployment.liveUrl, target }, { delay: 60_000, jobId: nextMonitorJobId(deploymentId) });

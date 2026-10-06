@@ -1,3 +1,5 @@
+import { runGitWatch } from "../services/gitWatcher.js";
+import { verifyWebhookSignature } from "../services/webhookSignature.js";
 import prisma from "../config/db.js";
 import {
   generatePKCE,
@@ -192,4 +194,17 @@ export const analyzeRepo = async (req, res) => {
     console.error("Error analyzing repository:", error.message);
     return res.status(500).json({ message: "Failed to analyze repository" });
   }
+};
+
+// GitHub webhook: a push or pull-request event makes the git watcher check that repository right away.
+export const githubWebhook = async (req, res) => {
+  if (!process.env.GITHUB_WEBHOOK_SECRET) return res.status(404).json({ message: "Webhooks are not enabled. Set GITHUB_WEBHOOK_SECRET." });
+  if (!verifyWebhookSignature(req.rawBody, req.get("x-hub-signature-256"))) return res.status(401).json({ message: "Invalid signature" });
+  const event = req.get("x-github-event");
+  if (event === "ping") return res.json({ ok: true });
+  const repoName = req.body?.repository?.full_name;
+  if (!["push", "pull_request"].includes(event) || !repoName) return res.status(202).json({ ignored: true });
+  // Answer GitHub immediately; the check itself can take a few seconds.
+  res.status(202).json({ accepted: true });
+  runGitWatch({ repoName }).catch((error) => console.warn(`[WEBHOOK] ${error.message}`));
 };

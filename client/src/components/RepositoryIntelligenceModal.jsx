@@ -97,7 +97,7 @@ CMD ["nginx", "-g", "daemon off;"]`,
     <div className="fixed inset-0 z-50 flex items-center justify-center bg-[#362217]/70 backdrop-blur-md p-4 sm:p-6 overflow-y-auto">
       <div role="dialog" aria-modal="true" aria-labelledby="repository-intelligence-title" className="relative w-full max-w-3xl rounded-3xl border border-[#EAE1D5] bg-white shadow-2xl overflow-hidden my-auto animate-in fade-in zoom-in-95 duration-200">
         {/* Modal Header */}
-        <div className="flex items-center justify-between px-6 py-5 border-b border-[#EAE1D5] bg-gradient-to-r from-[#FAF8F5] via-white to-[#FAF8F5]">
+        <div className="flex items-center justify-between px-6 py-5 border-b border-[#EAE1D5] bg-gradient-to-r from-[#FAF8F5] to-[#F3ECE3]">
           <div className="flex items-center gap-3.5">
             <div className="p-2.5 rounded-2xl bg-[#9E5D2D] text-white shadow-md shadow-[#9E5D2D]/20">
               <Cpu className="h-6 w-6" />

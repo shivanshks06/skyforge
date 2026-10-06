@@ -21,6 +21,7 @@ import { TARGETS, normalizeTarget } from "../services/targets.js";
 
 const CLOUDFRONT_HELP = "HTTPS switches on automatically once AWS enables CloudFront for the account (AWS Support: \"Account verification for CloudFront\").";
 import { pushImageToEcr } from "../services/ecrService.js";
+import { runCloudBuild } from "../services/cloudBuildService.js";
 import { deployToEcs, rollbackEcs, loadBalancerTargetsHealthy, projectNetwork, resourceNames } from "../services/ecsService.js";
 import { probeEndpoint, waitForDnsResolution } from "../services/healthService.js";
 import { addMonitorJob } from "../queues/monitorQueue.js";
@@ -32,6 +33,22 @@ import { decryptObjectValues, encryptObjectValues } from "../services/secretServ
 import { usesManagedDatabase, managedDatabaseKeys, ensureManagedDatabase, databaseEnvironment, restrictDatabaseToApp } from "../services/rdsService.js";
 import { collectProjectSource, analyzeSource, codeGate, imageGate, hardeningFor, syncCodePermissions, refreshProject } from "../services/deploySecurity.js";
 import { runSecurityAutomation } from "../services/securityAutomation.js";
+import { headCommit } from "../services/gitWatcher.js";
+import { reattachCustomDomain } from "../services/domainService.js";
+
+/** Saves which commit is being deployed (for the history page) unless the trigger already knew it. */
+async function recordCommit(deploymentId, project) {
+  try {
+    const existing = await prisma.deployment.findUnique({ where: { id: deploymentId }, select: { commitSha: true } });
+    if (existing?.commitSha) return;
+    const commit = await headCommit(project);
+    if (!commit) return;
+    await prisma.deployment.update({ where: { id: deploymentId }, data: { commitSha: commit.sha, commitMessage: commit.message, commitAuthor: commit.author } });
+    emitDeploymentLog(deploymentId, { stage: "CLONING", message: `[SOURCE] Deploying commit ${commit.sha.slice(0, 7)}: ${commit.message.split(/\r?\n/)[0].slice(0, 120)}`, level: "info" });
+  } catch {
+    // Commit details are informational; GitHub being slow must not stop a deployment.
+  }
+}
 
 const RUNNABLE_DEPLOYMENT_STATUSES = ["QUEUED", "BUILDING", "PUSHING", "PROVISIONING", "DEPLOYING", "HEALTH_CHECK"];
 const ACTIVE_DEPLOYMENT_STATUSES = ["QUEUED", "BUILDING", "PUSHING", "PROVISIONING", "DEPLOYING", "HEALTH_CHECK", "ROLLING_BACK", "DESTROYING", "DESTROY_FAILED"];
@@ -157,10 +174,21 @@ function staleWorkerError() {
   return error;
 }
 
+// When each stage started, per running deployment; saved with the deployment so the console can show step durations.
+const stageTimings = new Map();
+
 async function updateStage(deploymentId, workerJobId, data) {
+  let payload = data;
+  if (data.stage) {
+    const list = stageTimings.get(deploymentId) || [];
+    if (list.at(-1)?.stage !== data.stage) list.push({ stage: data.stage, at: new Date().toISOString() });
+    stageTimings.set(deploymentId, list);
+    payload = { ...data, stageTimings: list };
+    if (["COMPLETE", "FAILED", "CANCELLED"].includes(data.stage)) stageTimings.delete(deploymentId);
+  }
   const result = await prisma.deployment.updateMany({
     where: { id: deploymentId, workerJobId },
-    data,
+    data: payload,
   });
   if (result.count !== 1) throw staleWorkerError();
   return result;
@@ -254,6 +282,7 @@ export async function processDeploymentJob(job) {
       resources: resources ?? Prisma.DbNull,
     });
     if (resumeStep) emitDeploymentLog(deploymentId, { stage: "CLONING", message: `[RETRY] Re-running the verified pipeline from ${resumeStep}.`, level: "warn" });
+    await recordCommit(deploymentId, project);
 
     const sourceDir = await prepareRepository(project, deploymentId);
     await assertNotCancelled(deploymentId, workerJobId);
@@ -284,13 +313,23 @@ export async function processDeploymentJob(job) {
       await assertNotCancelled(deploymentId, workerJobId);
     } else {
     const imageTag = `skyforge-${String(project.id).toLowerCase().replace(/[^a-z0-9-]/g, "-")}-${String(deploymentId).slice(-8)}`;
-    const built = await buildContainerImage(project, deploymentId, sourceDir, imageTag);
+    // Cloud builds run in AWS CodeBuild and push from there; only the source archive leaves this machine.
+    const cloud = project.buildMode === "cloud" ? {
+      build: ({ archivePath, dockerfileName, buildArgs }) => pushImageToEcr(deploymentId, project, credentials, imageTag, persistResources, {
+        remoteBuild: ({ remoteImage }) => runCloudBuild({
+          credentials, archivePath, dockerfileName, imageUri: remoteImage, buildArgs, deploymentId,
+          isCancelled: () => assertNotCancelled(deploymentId, workerJobId).then(() => false, () => true),
+        }),
+      }),
+    } : null;
+    if (cloud) emitDeploymentLog(deploymentId, { stage: "BUILDING", message: "[CLOUD BUILD] This project builds in AWS CodeBuild, not on this machine.", level: "info" });
+    const built = await buildContainerImage(project, deploymentId, sourceDir, imageTag, { cloud });
     // The build plan decides the listening port from the source (e.g. 80 for nginx-served SPAs).
     const runtimeProject = { ...project, port: built.port || project.port };
     await assertNotCancelled(deploymentId, workerJobId);
     activeStep = "PUSHING";
     await updateStage(deploymentId, workerJobId, { status: "PUSHING", stage: "PUSHING", currentStep: "PUSHING" });
-    const pushed = await pushImageToEcr(deploymentId, project, credentials, imageTag, persistResources);
+    const pushed = built.pushed || await pushImageToEcr(deploymentId, project, credentials, imageTag, persistResources);
     resources = {
       ...(resources || {}),
       type: "ECS_FARGATE",
@@ -413,6 +452,10 @@ export async function processDeploymentJob(job) {
     }
     emitDeploymentLog(deploymentId, { stage: "LIVE", message: `[LIVE] Application is live at ${deployResult.endpoint}`, level: "success" });
     await secureLiveDeployment({ project, credentials, deploymentId, resources, liveUrl: deployResult.endpoint, imageDigest, sourceDir, target });
+    // A custom domain survives redeploys: make sure the new resources still answer for it.
+    await reattachCustomDomain({ projectId, credentials, resources, log: (message, level = "info") => emitDeploymentLog(deploymentId, { stage: "LIVE", message, level }) }).catch((domainError) => {
+      emitDeploymentLog(deploymentId, { stage: "LIVE", message: `[DOMAIN] Custom domain could not be re-attached: ${String(domainError.message).slice(0, 160)}`, level: "warn" });
+    });
     // Baseline the watchers (known CVEs, latest commit, cost) in the background.
     void runSecurityAutomation({ projectId, credentials, resources, liveUrl: deployResult.endpoint, deploymentId, only: ["cve", "push", "wallet"] }).catch(() => {});
     try {

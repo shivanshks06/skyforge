@@ -139,3 +139,32 @@ export const getBlastRadius = async (id) => (await api.get(`/projects/${id}/secu
 export const getCostEstimate = async (id) => (await api.get(`/projects/${id}/security/cost`, { timeout: 60_000 })).data;
 export const getProjectDatabase = async (id) => (await api.get(`/projects/${id}/database`)).data;
 export const saveProjectDatabase = async (id, body) => (await api.post(`/projects/${id}/database`, body)).data;
+export const saveBuildMode = async (id, mode) => (await api.post(`/projects/${id}/build-mode`, { mode })).data;
+export const getAwsReadiness = async () => (await api.get("/aws/readiness", { timeout: 120_000 })).data;
+
+// Auto-deploy on push and pull-request previews
+export const getProjectAutomation = async (id) => (await api.get(`/projects/${id}/automation`)).data;
+export const saveProjectAutomation = async (id, settings) => (await api.post(`/projects/${id}/automation`, settings)).data;
+export const checkProjectGitNow = async (id) => (await api.post(`/projects/${id}/automation/check`, {}, { timeout: 120_000 })).data;
+// Custom domain
+export const getProjectDomain = async (id) => (await api.get(`/projects/${id}/domain`)).data;
+export const addProjectDomain = async (id, domain) => (await api.post(`/projects/${id}/domain`, { domain }, { timeout: 60_000 })).data;
+export const checkProjectDomain = async (id) => (await api.post(`/projects/${id}/domain/check`, {}, { timeout: 120_000 })).data;
+export const removeProjectDomain = async (id) => (await api.delete(`/projects/${id}/domain`, { timeout: 180_000 })).data;
+// Costs and budget
+export const getProjectCostPreview = async (id) => (await api.get(`/projects/${id}/cost/preview`)).data;
+export const getAccountCosts = async (refresh = false) => (await api.get(`/aws/costs${refresh ? "?refresh=1" : ""}`, { timeout: 60_000 })).data;
+export const saveBudget = async (budget) => (await api.post("/aws/budget", budget)).data;
+// Monitoring
+export const getProjectMetrics = async (id, range = "1h") => (await api.get(`/projects/${id}/monitor/metrics`, { params: { range }, timeout: 60_000 })).data;
+export const getProjectAppLogs = async (id, params = {}) => (await api.get(`/projects/${id}/monitor/logs`, { params, timeout: 60_000 })).data;
+export const getProjectUptime = async (id) => (await api.get(`/projects/${id}/monitor/uptime`)).data;
+// Runtime settings, status page
+export const saveProjectRuntime = async (id, settings) => (await api.post(`/projects/${id}/runtime`, settings)).data;
+export const getProjectStatusPage = async (id) => (await api.get(`/projects/${id}/status-page`)).data;
+export const saveProjectStatusPage = async (id, settings) => (await api.post(`/projects/${id}/status-page`, settings)).data;
+export const getPublicStatus = async (slug) => (await api.get(`/public/status/${encodeURIComponent(slug)}`)).data;
+// Deployment history, restore, diagnosis
+export const getDeploymentHistory = async (params = {}) => (await api.get("/deployments/history", { params })).data;
+export const restoreDeploymentVersion = async (id) => (await api.post(`/deployments/${id}/restore`, {}, { timeout: 60_000 })).data;
+export const getDeploymentDiagnosis = async (id) => (await api.get(`/deployments/${id}/diagnosis`)).data;

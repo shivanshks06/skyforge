@@ -20,6 +20,7 @@ import {
 import Card from "../components/Card";
 import Button from "../components/Button";
 import TargetChooser from "../components/TargetChooser";
+import BuildLocationCard from "../components/BuildLocationCard";
 import {
   getProjectInfrastructure,
   updateProjectInfrastructureTarget,
@@ -278,6 +279,8 @@ export default function InfrastructurePreview() {
 
       {/* Deployment Target (nothing preselected) */}
       <TargetChooser choices={data.choices || []} selected={data.target} onChoose={handleChooseTarget} busy={switchingTarget} />
+
+      <BuildLocationCard projectId={id} initialMode={project.buildMode} onNotify={(message, type) => showNotification(type, message)} />
 
       {data.target && (
       <>

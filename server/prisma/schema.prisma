@@ -16,6 +16,7 @@ model User {
   projects      Project[]
   awsConnection AwsConnection?
   alertSettings Json?
+  budget        Json?
 }
 
 model GitHubAccount {
@@ -47,6 +48,14 @@ model Project {
   protection       Json?
   siteOffline      Boolean      @default(false)
   databaseConfig   Json?
+  buildMode        String       @default("local")
+  autoDeploy       Boolean      @default(false)
+  previewsEnabled  Boolean      @default(false)
+  parentProjectId  String?
+  previewPr        Int?
+  gitWatch         Json?
+  customDomain     Json?
+  statusPage       Json?
   deploymentTarget String?
   confidence       Int?
   status           String       @default("Imported")
@@ -56,6 +65,7 @@ model Project {
   user             User         @relation(fields: [userId], references: [id])
   deployments      Deployment[]
   securityEvents   SecurityEvent[]
+  uptime           UptimeBucket[]
 
   // Sprint 5 Planning & Blueprint fields
   cpu            String?
@@ -80,6 +90,7 @@ model Project {
   updatedAt DateTime @default(now()) @updatedAt
 
   @@index([userId, createdAt])
+  @@index([parentProjectId])
 }
 
 // Sprint 8 AWS Connection Model (Zero static secret keys; STS AssumeRole only)
@@ -122,6 +133,12 @@ model Deployment {
   rollbackOriginalStatus String?
   teardownResources      Json?
   teardownDeploymentIds  Json?
+  trigger      String?
+  commitSha    String?
+  commitMessage String?
+  commitAuthor String?
+  stageTimings Json?
+  restoredFromId String?
   startedAt    DateTime?
   completedAt  DateTime?
   createdAt    DateTime  @default(now())
@@ -161,4 +178,16 @@ model ThreatIntel {
   lastSeen   DateTime @default(now())
 
   @@index([lastSeen])
+}
+
+// Hourly uptime roll-up from the health monitor; feeds the public status page.
+model UptimeBucket {
+  projectId    String
+  project      Project  @relation(fields: [projectId], references: [id], onDelete: Cascade)
+  hour         DateTime
+  checks       Int      @default(0)
+  failures     Int      @default(0)
+  latencyTotal Int      @default(0)
+
+  @@id([projectId, hour])
 }

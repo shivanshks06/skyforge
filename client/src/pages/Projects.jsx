@@ -3,7 +3,9 @@ import { Link, useNavigate, useSearchParams } from "react-router-dom";
 import Card from "../components/Card";
 import Button from "../components/Button";
 import Input from "../components/Input";
-import RepositoryIntelligenceCard from "../components/RepositoryIntelligenceCard";
+import ProjectCard from "../components/ProjectCard";
+import StatusBadge from "../components/StatusBadge";
+import { projectState } from "../utils/projectState";
 import {
   FolderGit2,
   Plus,
@@ -220,11 +222,11 @@ export default function Projects() {
           <div className="flex items-center gap-2">
             <h2 className="text-2xl font-bold text-[#362217]">Projects</h2>
             <span className="text-[11px] font-bold px-2.5 py-0.5 rounded-full bg-[#9E5D2D]/10 text-[#9E5D2D] border border-[#9E5D2D]/20">
-              Intelligence Engine Active
+              {projectsList.length} total
             </span>
           </div>
           <p className="text-xs text-[#5E4C3E] mt-1">
-            Automated deployment profiles and cloud infrastructure configurations.
+            Each project is one GitHub repository. Open one to deploy it, see its logs, or change its settings.
           </p>
         </div>
         <div className="flex items-center gap-2.5">
@@ -297,19 +299,21 @@ export default function Projects() {
 
       {/* Projects Grid */}
       {loading ? (
-        <div className="flex justify-center items-center py-16 text-xs text-[#8C7667] gap-2">
-          <div className="h-5 w-5 animate-spin rounded-full border-2 border-[#9E5D2D] border-t-transparent" />
-          <span>Loading project intelligence profiles...</span>
+        <div className="grid grid-cols-1 md:grid-cols-2 2xl:grid-cols-3 gap-5" aria-busy="true" aria-label="Loading projects">
+          {[0, 1, 2, 3].map((index) => (
+            <div key={index} className="flex flex-col gap-3 rounded-3xl border border-[#EAE1D5] bg-white p-5">
+              <div className="skeleton h-5 w-1/2" />
+              <div className="skeleton h-3 w-2/3" />
+              <div className="flex gap-2"><div className="skeleton h-5 w-16" /><div className="skeleton h-5 w-16" /><div className="skeleton h-5 w-14" /></div>
+              <div className="skeleton h-9 w-36" />
+            </div>
+          ))}
         </div>
       ) : filteredProjects.length > 0 ? (
         viewMode === "cards" ? (
-          <div className="grid grid-cols-1 lg:grid-cols-2 gap-6">
+          <div className="grid grid-cols-1 md:grid-cols-2 2xl:grid-cols-3 gap-5">
             {filteredProjects.map((proj) => (
-              <RepositoryIntelligenceCard
-                key={proj.id}
-                project={proj}
-                onDelete={setProjectToDelete}
-              />
+              <ProjectCard key={proj.id} project={proj} onDelete={setProjectToDelete} />
             ))}
           </div>
         ) : (
@@ -322,9 +326,7 @@ export default function Projects() {
                       <FolderGit2 className="h-5 w-5" />
                     </div>
                     <div className="flex items-center gap-2">
-                      <span className="text-[10px] font-semibold px-2.5 py-1 rounded-full border bg-[#2E6B4F]/10 text-[#2E6B4F] border-[#2E6B4F]/30">
-                        {proj.status || "Ready"}
-                      </span>
+                      <StatusBadge state={projectState(proj)} size="xs" />
                       <button
                         onClick={() => setProjectToDelete(proj)}
                         className="p-1 rounded-lg text-[#8C7667] hover:text-[#9E2A2B] hover:bg-[#9E2A2B]/10 transition"

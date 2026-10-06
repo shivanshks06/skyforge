@@ -119,6 +119,10 @@ export async function pushImageToEcr(deploymentId, project, credentials, localTa
       level: /error|failed|fatal/i.test(line) ? "warn" : "info",
     });
 
+    if (options.remoteBuild) {
+      // Cloud build: the image is built and pushed inside AWS, nothing is uploaded from here.
+      await options.remoteBuild({ remoteImage, registry, imageTag });
+    } else {
     await runCommand("docker", ["login", "--username", "AWS", "--password-stdin", registry], {
       input: `${password}\n`,
       timeout: 30_000,
@@ -126,22 +130,32 @@ export async function pushImageToEcr(deploymentId, project, credentials, localTa
     });
     try {
       await runCommand("docker", ["tag", localTag, remoteImage], { timeout: 30_000, onLine });
-      for (let attempt = 1; attempt <= 3; attempt += 1) {
+      // docker push prints nothing while a big layer uploads, so a stall can only be judged by
+      // layers finishing. Each retry waits longer (a slow link is not a dead one), and the last
+      // attempt relies on the overall timeout alone.
+      const baseStall = Number.parseInt(process.env.PUSH_STALL_MS || "240000", 10);
+      // Every attempt keeps the layers that made it, so a flaky link gets there in the end.
+      const stallFor = [baseStall, baseStall * 2.5, 0, 0, 0];
+      const attempts = stallFor.length;
+      for (let attempt = 1; attempt <= attempts; attempt += 1) {
         try {
           await runCommand("docker", ["push", remoteImage], {
-            timeout: Number.parseInt(process.env.PUSH_TIMEOUT_MS || "900000", 10),
+            timeout: Number.parseInt(process.env.PUSH_TIMEOUT_MS || "1800000", 10),
+            // A layer finishing, or a new layer starting, is progress; endless "Waiting" is not.
+            stallTimeout: stallFor[attempt - 1],
+            isProgress: (line) => /Pushed|Layer already exists|Mounted from|Preparing|digest:/i.test(line),
             onLine,
           });
           break;
         } catch (pushErr) {
-          const isTransient = /timeout|EOF|connection reset|broken pipe|retry|temporary|500|502|503|504|closed network|network connection|failed to copy|failed to do request/i.test(String(pushErr.message || ""));
-          if (attempt < 3 && isTransient) {
+          const isTransient = /timeout|stalled|EOF|connection reset|broken pipe|retry|temporary|500|502|503|504|closed network|network connection|failed to copy|failed to do request/i.test(String(pushErr.message || ""));
+          if (attempt < attempts && isTransient) {
             log(deploymentId, {
               stage: "PUSHING",
-              message: `[ECR] Layer upload attempt ${attempt} notice: transient network timeout. Resuming push in 3s...`,
+              message: `[ECR] Upload attempt ${attempt}/${attempts} ${/stalled/.test(pushErr.message) ? "stalled (no layer finished for a while)" : "hit a network error"}. Retrying in 10s; layers already uploaded are skipped.`,
               level: "warn",
             });
-            await new Promise((r) => setTimeout(r, 3000));
+            await new Promise((r) => setTimeout(r, 10_000));
             continue;
           }
           throw pushErr;
@@ -151,6 +165,7 @@ export async function pushImageToEcr(deploymentId, project, credentials, localTa
       await runCommand("docker", ["logout", registry], { timeout: 30_000 }).catch(() => {});
       await runCommand("docker", ["image", "rm", "--force", localTag], { timeout: 30_000 }).catch(() => {});
       await runCommand("docker", ["image", "rm", "--force", remoteImage], { timeout: 30_000 }).catch(() => {});
+    }
     }
 
     const described = await ecr.send(new DescribeImagesCommand({
